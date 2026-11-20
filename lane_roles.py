@@ -4,10 +4,13 @@ import numpy as np
 from lane_motion import Path, nearest
 
 ROLE_LEN = 3.0        # 내 차로 선으로 인정하는 최소 길이(m)
-ROLE_TURN = 30.0      # 내 차로 선은 차량 진행 방향과 이 각(도) 안으로 나란해야 함 (가로지르는 유도선 제외)
+ROLE_TURN = 45.0      # 내 차로 선은 차량 진행 방향과 이 각(도) 안으로 나란해야 함 (가로지르는 유도선 제외)
 ROLE_MARGIN = 1.0     # 내 차로 선을 다른 선으로 바꾸려면 이만큼(m) 더 가까워야 함
 Z_REF = 4.0           # 차선 번호를 정하는 기준 거리(차량 앞, m)
 MAX_SIDE = 3.5        # 내 차로 경계로 인정하는 최대 옆 거리(m)
+PAIR_LEN = 1.0        # 차로 폭으로 찾는 반대쪽 선의 최소 길이(m)
+PAIR_TOL = 0.8        # 차로 폭과 이만큼(m) 안으로 맞아야 반대쪽 선으로 인정
+PAIR_MID = 0.6        # 고른 선이 차량 앞 이 거리(m) 안에 있으면 좌우가 바뀌었을 수 있다고 봄
 
 
 def x_at(curve, z_ref):
@@ -24,7 +27,35 @@ def x_at(curve, z_ref):
     return float(e[0] + d[0] * (z_ref - e[1]) / d[1])
 
 
-def pick(tracks, prev, min_hits):
+def side_gap(t, a):
+    """선 t가 선 a에서 옆으로 떨어진 거리(m, +면 오른쪽). t의 가운데 거리에서 잰다. 못 재면 None."""
+    zc = float(np.median(t.curve.sample(0.5)[:, 1]))
+    xt, xa = x_at(t.curve, zc), x_at(a.curve, zc)
+    return None if xt is None or xa is None else xt - xa
+
+
+def fill(tracks, left, right, min_hits, width):
+    """한쪽 선만 골랐을 때, 그 선에서 차로 폭만큼 떨어진 '보이는 선'을 반대쪽 선으로 쓴다(짧아도 인정).
+
+    빈 쪽에는 없고 반대편에만 있으면서 고른 선이 차량 바로 앞에 있으면, 고른 선의 좌우가 바뀐 것으로 본다."""
+    a, best = left or right, {}
+    for t in tracks:
+        if t is a or t.det is None or t.hits < min_hits or t.curve.length < PAIR_LEN:
+            continue
+        d = side_gap(t, a)
+        for sgn in (-1, 1):
+            if d is not None and abs(d - sgn * width) < PAIR_TOL and (sgn not in best or abs(d - sgn * width) < best[sgn][0]):
+                best[sgn] = (abs(d - sgn * width), t)
+    want = 1 if right is None else -1                    # 비어 있는 쪽 (+1 = 오른쪽)
+    if want in best:
+        return (a, best[want][1]) if want == 1 else (best[want][1], a)
+    xa = x_at(a.curve, Z_REF)
+    if -want in best and xa is not None and abs(xa) < PAIR_MID:
+        return (best[-want][1], a) if want == 1 else (a, best[-want][1])
+    return left, right
+
+
+def pick(tracks, prev, min_hits, width=3.3):
     """추적 중인 선들에서 내 차로의 (왼쪽 선, 오른쪽 선)을 고른다. 없으면 None. prev = 직전에 고른 (왼쪽, 오른쪽).
 
     직전에 고른 선이 조건에 맞으면 유지하고, 다른 선이 뚜렷이 더 가까울 때만 바꾼다(번호가 오락가락하지 않게).
@@ -49,6 +80,8 @@ def pick(tracks, prev, min_hits):
         elif keep is not None and (keep[1].det is None or best[0] > keep[0] - ROLE_MARGIN):
             best = keep
         out.append(best[1] if best else None)
+    if (out[0] is None) != (out[1] is None):             # 한쪽만 골랐으면 차로 폭을 근거로 반대쪽을 찾음
+        return fill(tracks, out[0], out[1], min_hits, width)
     return out[0], out[1]
 
 

@@ -11,13 +11,14 @@
 """
 import argparse
 import csv
+import gzip
 import json
 import os
 
 import cv2
 import numpy as np
 
-from gen_dataset import background
+from gen_dataset import background, to_yolo
 from scene import Scene
 
 ZS = np.round(np.arange(0.1, 1.01, 0.1), 2)     # 정답을 기록할 앞 거리(m)
@@ -91,12 +92,13 @@ def main():
     ap.add_argument("--fps", type=float, default=15.0)
     ap.add_argument("--wobble", type=float, default=0.03, help="좌우 흔들림 진폭(m)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--gt-dets", action="store_true", help="정답 라벨을 검출 결과 형식(drive_gtdets.json.gz)으로도 저장")
     a = ap.parse_args()
-    rng = np.random.default_rng(a.seed)
+    rng, dets = np.random.default_rng(a.seed), []
     np.random.seed(a.seed)
     os.makedirs(a.out, exist_ok=True)
     sc = Scene(a.road, a.cam)
-    lw = sc.info["lane_w"] / 1000.0
+    lw, names = sc.info["lane_w"] / 1000.0, sc.info["classes"]
     path = np.asarray(sc.info["paths"][a.path]) / 1000.0
     c, s = resample(path, a.speed / a.fps)
     keep = s < s[-1] - END_MARGIN
@@ -116,7 +118,11 @@ def main():
     wr.writerow(["frame", "t", "x", "y", "yaw", "offset"] + [f"{n}_{z:.1f}" for n in ("left", "right", "center") for z in ZS])
     for i in range(len(pos)):
         dtilt = float(np.clip(rng.normal(0, 0.1), -0.2, 0.2))
-        img, _ = sc.render(pos[i, 0], pos[i, 1], yaw[i], dtilt=dtilt)
+        img, inst = sc.render(pos[i, 0], pos[i, 1], yaw[i], dtilt=dtilt)
+        if a.gt_dets:                                                  # 모델 없이 후처리만 시험할 때 쓰는 '완벽한 검출'
+            polys = [ln.split() for ln in to_yolo(inst, sc.info["instances"], names)]
+            dets.append({"k": i, "polys": [[int(p[0]), 1.0] + [round(float(v) * (sc.W, sc.H)[j % 2], 1)
+                                                                 for j, v in enumerate(p[1:])] for p in polys]})
         img = look(img, tint, 3.0, bg)
         cam_xy = sc.pose(pos[i, 0], pos[i, 1], yaw[i])[0][:2]          # 카메라 바로 아래 바닥 = 정답 좌표 원점
         gl, gr, gc = (lateral_at(L, cam_xy, yaw[i]) for L in (left, rightl, path))
@@ -127,6 +133,10 @@ def main():
             cv2.imwrite(os.path.join(a.out, "check.jpg"),
                         draw_gt(img.copy(), sc, sc.pose(pos[i, 0], pos[i, 1], yaw[i], dtilt=dtilt), (left, rightl, path)))
     vw.release()
+    if a.gt_dets:
+        with gzip.open(os.path.join(a.out, "drive_gtdets.json.gz"), "wt", encoding="utf-8") as g:
+            json.dump({"video": "drive.mp4", "fps": a.fps, "stride": 1, "size": [sc.W, sc.H],
+                       "names": {str(k): n for k, n in enumerate(names)}, "frames": dets}, g)
     f.close()
     sc.close()
     json.dump({"road": os.path.abspath(a.road), "path": a.path, "speed": a.speed, "fps": a.fps, "frames": len(pos),

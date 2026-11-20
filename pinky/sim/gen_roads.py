@@ -45,15 +45,18 @@ def pieces(line, dash, space, phase):
         i = j
     return out
 
+# 규격을 뽑는 범위(mm): 차로 폭, 선 굵기, 점선 길이, 점선 간격. 기본은 실제 도로의 1/16 주변, WIDE는 규격이 바뀌는 경우 시험용
+RG = {"lane": (180, 230), "line": (9, 11), "dash": (170, 210), "gap": (280, 340)}
+WIDE = {"lane": (150, 300), "line": (6, 20), "dash": (100, 350), "gap": (150, 450)}
 
 class Road:
     """테이프 다각형(클래스 포함)과 주행 경로를 모은다."""
 
     def __init__(self, rng):
         self.rng, self.marks, self.paths = rng, [], []
-        self.lane_t = rng.uniform(9, 11)                 # 차선 테이프 폭 (10mm 기준)
+        self.lane_t = rng.uniform(*RG["line"])           # 차선 테이프 폭
         self.stop_t = rng.uniform(17, 21)                # 정지선 (19mm)
-        self.dash, self.space = rng.uniform(170, 210), rng.uniform(280, 340)   # 점선 3m·5m의 1/16 주변
+        self.dash, self.space = rng.uniform(*RG["dash"]), rng.uniform(*RG["gap"])   # 점선 길이, 간격
 
     def solid(self, line):
         self.marks.append(("white_lane", strip(line, self.lane_t)))
@@ -78,7 +81,7 @@ class Road:
 def winding(rng):
     """구불구불한 왕복 도로 (기본: 편도 2차로)."""
     r = Road(rng)
-    n, lw = (2 if rng.random() < 0.75 else 1), rng.uniform(180, 230)
+    n, lw = (2 if rng.random() < 0.75 else 1), rng.uniform(*RG["lane"])
     # 굽은 정도는 가장 급한 곳의 곡선 반경으로 정한다: 0.9~3.0m (실제 15~48m, 도시부 저속 도로의 급한 곡선)
     rad, lam, length = rng.uniform(900, 3000), rng.uniform(2000, 4500), rng.uniform(3000, 4800)
     amp = min(lam ** 2 / (4 * np.pi ** 2 * rad), 600)  # 사인 곡선의 꼭대기 곡률 = 진폭·(2π/주기)²
@@ -88,14 +91,13 @@ def winding(rng):
     wave = np.sin(2 * np.pi * y / lam + ph[0]) + mix * np.sin(2 * np.pi * y / (lam * 0.47) + ph[1])
     center = np.c_[w / 2 + amp * wave, y]
     r.carriageway(center, n, lw)
-    return r, (w, length), {"type": "winding", "lanes_per_dir": n, "lane_w": lw, "amp": amp, "wavelength": lam,
-                            "min_radius": rad}
+    return r, (w, length), {"type": "winding", "lanes_per_dir": n, "lane_w": lw, "amp": amp, "wavelength": lam, "min_radius": rad}
 
 
 def cross(rng):
     """십자 또는 T자 교차로. 진입부마다 횡단보도와 정지선."""
     r = Road(rng)
-    n, lw = (1 if rng.random() < 0.6 else 2), rng.uniform(180, 230)
+    n, lw = (1 if rng.random() < 0.6 else 2), rng.uniform(*RG["lane"])
     half, arm = n * lw, rng.uniform(900, 1800)
     size = 2 * (arm + half)
     c = size / 2
@@ -165,13 +167,12 @@ def render(road, size, ppm, rng):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--count", type=int, default=20)
-    ap.add_argument("--out", default="~/pinky_sim/roads")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--ppm", type=float, default=2.0)
+    ap.add_argument("--count", type=int, default=20), ap.add_argument("--out", default="~/pinky_sim/roads")
+    ap.add_argument("--seed", type=int, default=0), ap.add_argument("--ppm", type=float, default=2.0)
+    ap.add_argument("--wide", action="store_true", help="규격(차로 폭·점선·선 굵기)을 넓은 범위에서 뽑기")
     ap.add_argument("--type", choices=["any", "winding", "cross"], default="any", help="만들 도로 종류")
     a = ap.parse_args()
-    out = os.path.expanduser(a.out)
+    out, _ = os.path.expanduser(a.out), RG.update(WIDE if a.wide else {})
     for i in range(a.count):
         rng = np.random.default_rng(a.seed * 100000 + i)
         kind = a.type if a.type != "any" else ("winding" if rng.random() < 0.5 else "cross")
@@ -181,7 +182,7 @@ def main():
         os.makedirs(d, exist_ok=True)
         cv2.imwrite(os.path.join(d, "floor.png"), floor)
         cv2.imwrite(os.path.join(d, "inst.png"), inst)
-        info.update(size_mm=list(size), ppm=a.ppm, classes=CLASSES,
+        info.update(size_mm=list(size), ppm=a.ppm, classes=CLASSES, line_w=road.lane_t, dash=road.dash, gap=road.space,
                     instances={str(k): c for k, (c, _) in enumerate(road.marks, start=1)}, paths=road.paths)
         json.dump(info, open(os.path.join(d, "road.json"), "w"))
         pv = floor.copy()

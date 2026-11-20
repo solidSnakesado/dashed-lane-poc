@@ -4,6 +4,7 @@
 - 단위: 결과 CSV는 실제 도로 크기(축척 배) 좌표라서 calib의 scale로 나눠 실제 m로 맞춤
 - 짝: L1 ↔ 정답 왼쪽 선, L2 ↔ 정답 오른쪽 선, 중심선 ↔ 정답 중심선
 - 카메라 화면 밖의 정답 점은 평가에서 뺌
+- 판정 거리·허용 오차·곡선 기준은 고정값이 아니라 그 도로의 차로 폭(정답 파일에서 구함)과 카메라에서 계산
 - 직선·곡선 구간은 정답 중심선이 휘는 정도(반경)로 나눔
 출력: 화면 요약표, 결과 CSV 옆에 eval_drive.csv (프레임별 오차와 판정)
 """
@@ -20,9 +21,11 @@ from lane_geom import Camera  # noqa: E402  (저장소 루트의 바닥 ↔ 화�
 
 ROLES = (("lane1", "left"), ("lane2", "right"), ("center", "center"))
 EXTRA = 0.10     # 결과 선 끝에서 이 거리(m)까지는 끝 방향으로 늘려서 비교
-OK_ERR = 0.03    # 이 오차(m) 안이면 정답 선으로 판정
-NEAR_ERR = 0.06  # 이 오차(m) 안이면 '3~6cm' (같은 선이지만 어긋남)
-GOAL_ERR = 0.02  # 목표: 옆 오차 중앙값(m)
+# 판정 기준은 고정 길이가 아니라 그 도로의 차로 폭에 대한 비율이다 (차로 폭은 정답 파일에서 구함)
+OK_ERR, NEAR_ERR = 0.15, 0.30   # 오차가 차로 폭의 이 비율 안이면 '정답', 다음 비율 안이면 '어긋남'(같은 선이지만 위치가 틀림)
+GOAL_ERR = 0.10  # 목표: 옆 오차 중앙값(차로 폭 대비)
+SIDE = 0.75      # 판정 거리: 좌우로 차로 폭의 이 배수 지점이 화면에 함께 보이는 가장 가까운 거리
+CURVE = 10.0     # 곡선 구간: 반경이 차로 폭의 이 배수보다 작은 곳
 GOAL_BOTH = 0.95 # 목표: 양쪽 선 비율
 
 
@@ -89,9 +92,7 @@ def stat(v):
 def main():
     ap = argparse.ArgumentParser(description="후처리 결과를 시뮬 정답과 비교")
     ap.add_argument("result", help="lane_run.py가 만든 lane_<이름>.csv")
-    ap.add_argument("gt", help="sim_drive.py가 만든 gt.csv")
-    ap.add_argument("calib", help="lane_run.py에 넣은 calib npz (축척 포함)")
-    ap.add_argument("--curve-r", type=float, default=2.0, help="이 반경(m)보다 작으면 곡선 구간")
+    ap.add_argument("gt", help="sim_drive.py가 만든 gt.csv"), ap.add_argument("calib", help="lane_run.py에 넣은 calib npz")
     ap.add_argument("--size", default="640x480", help="카메라 화면 크기")
     a = ap.parse_args()
     scale = float(np.load(a.calib)["scale"])
@@ -99,21 +100,24 @@ def main():
     res = read_result(a.result, scale)
     gt = list(csv.DictReader(open(a.gt)))
     zs = sorted({float(c.split("_")[1]) for c in gt[0] if c.startswith("left_")})
+    lw = float(np.median([gx(g, "right", zs[1]) - gx(g, "left", zs[1]) for g in gt if gx(g, "right", zs[1]) and gx(g, "left", zs[1])]))
+    zj = next((z for z in zs if all(visible(cam, scale, sx * SIDE * lw, z, size) for sx in (-1, 1))), zs[-1])
+    print(f"차로 폭 {lw * 1000:.0f} mm → 판정 거리 앞 {zj:.1f} m, 정답 허용 오차 {OK_ERR * lw * 100:.1f} cm")
 
-    seg_of, rows = {}, []
+    rows = []
     errs = defaultdict(lambda: defaultdict(list))    # [구간][역할_거리] → 오차 목록
     cls = defaultdict(lambda: defaultdict(int))       # [구간][역할:판정] → 프레임 수
-    both = defaultdict(lambda: [0, 0, 0])             # [구간] → [양쪽 있음, 양쪽 정답, 프레임 수]
+    both = defaultdict(lambda: [0, 0, 0, 0])          # [구간] → [양쪽 있음, 양쪽 정답, 프레임 수, 판정 가능 수]
     tip = defaultdict(list)                           # [구간] → 먼 쪽 오차의 프레임 간 변화
     prev, prev_far, switches = {}, {}, defaultdict(int)
-    for g in gt:
+    start = min(res, default=0)        # 그 전 프레임은 후처리가 도로 규격을 재는 구간이라 평가에서 뺌
+    for g in gt[start:]:
         k = int(g["frame"])
         cz = [z for z in zs if visible(cam, scale, gx(g, "center", z), z, size)]
         cx = [gx(g, "center", z) for z in cz]
-        seg = "곡선" if len(cz) >= 3 and radius(np.array(cz), np.array(cx)) < a.curve_r else "직선"
-        seg_of[k] = seg
+        seg = "곡선" if len(cz) >= 3 and radius(np.array(cz), np.array(cx)) < CURVE * lw else "직선"
         fr = res.get(k, {})
-        row, got, good, far = [k, seg], 0, 0, {}
+        row, got, good, skip, far = [k, seg], 0, 0, 0, {}
         for role, name in ROLES:
             line = fr.get(role)
             vis = [z for z in zs if visible(cam, scale, gx(g, name, z), z, size)]
@@ -121,34 +125,33 @@ def main():
             for z in vis:
                 x = None if line is None else x_at(line[0], z)
                 e[z] = None if x is None else x - gx(g, name, z)
-            for z in (0.2, 0.4):
-                if z in e:
-                    errs[seg][f"{role}_{z}"].append(e[z])
-            # 0.4 m 지점으로 판정
-            if 0.4 not in vis:
+            if zj in e:
+                errs[seg][role].append(None if e[zj] is None else e[zj] / lw)
+            # 판정 거리 zj에서 판정
+            if zj not in vis:
                 c = "평가제외"
-            elif line is None or e[0.4] is None:
-                c = "없음" if line is None else "0.4m못닿음"
-            elif abs(e[0.4]) < NEAR_ERR:
-                c = "정답" if abs(e[0.4]) < OK_ERR else "3~6cm"
+            elif line is None or e[zj] is None:
+                c = "없음" if line is None else "못닿음"
+            elif abs(e[zj]) < NEAR_ERR * lw:
+                c = "정답" if abs(e[zj]) < OK_ERR * lw else "어긋남"
             else:
                 other = {"left": "right", "right": "left"}.get(name)
-                xo = None if other is None else gx(g, other, 0.4)
-                x = e[0.4] + gx(g, name, 0.4)
-                c = "반대선" if xo is not None and abs(x - xo) < OK_ERR else "다른선"
+                xo = None if other is None else gx(g, other, zj)
+                x = e[zj] + gx(g, name, zj)
+                c = "반대선" if xo is not None and abs(x - xo) < OK_ERR * lw else "다른선"
             cls[seg][f"{role}:{c}"] += 1
             if role != "center":
                 got += line is not None
                 good += c == "정답"
+                skip += c == "평가제외"
                 if line is not None:     # 역할 바뀜: 직전 프레임과 추적 번호가 다르면
                     if role in prev and prev[role] != line[1]:
                         switches[seg] += 1
                     prev[role] = line[1]
             far[role] = {z: v for z, v in e.items() if v is not None}
-            row += [c] + [("" if e.get(z) is None else f"{e[z]:.4f}") for z in (0.2, 0.4)]
-        both[seg][0] += got == 2
-        both[seg][1] += good == 2
-        both[seg][2] += 1
+            row += [c, "" if e.get(zj) is None else f"{e[zj]:.4f}", "" if e.get(zj) is None else f"{100 * e[zj] / lw:.1f}"]
+        # 판정 가능 = 양쪽 선 모두 화면 안에 있어 맞았는지 볼 수 있는 프레임
+        both[seg] = [v + d for v, d in zip(both[seg], (got == 2, good == 2, 1, skip == 0))]
         for role in ("lane1", "lane2"):   # 끝 떨림: 두 프레임 모두에 있는 가장 먼 거리에서 오차 변화
             last = prev_far.get(role, {})
             common = sorted(set(last) & set(far[role]))
@@ -160,14 +163,14 @@ def main():
     out = os.path.join(os.path.dirname(os.path.abspath(a.result)), "eval_drive.csv")
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["frame", "segment"] + [f"{r}_{c}" for r, _ in ROLES for c in ("판정", "err_0.2", "err_0.4")])
+        w.writerow(["frame", "segment"] + [f"{r}_{c}" for r, _ in ROLES for c in ("판정", "err_m", "err_pct")])
         w.writerows(rows)
-    report(errs, cls, both, tip, switches, a.curve_r)
-    print(f"저장: {out}")
+    report(errs, cls, both, tip, switches, lw, zj)
+    print(f"규격 측정 구간(평가 제외): 처음 {start}프레임\n저장: {out}")
 
 
 
-def report(errs, cls, both, tip, switches, curve_r):
+def report(errs, cls, both, tip, switches, lw, zj):
     """구간별(직선·곡선·전체) 요약표를 출력하고 목표 통과 여부를 표시한다."""
     segs = sorted(both) + ["전체"]
     for d in (errs, cls):                     # 구간별 값을 더해 '전체'를 만듦 (목록은 이어 붙이고 개수는 더함)
@@ -179,16 +182,13 @@ def report(errs, cls, both, tip, switches, curve_r):
     switches["전체"] = sum(switches[s] for s in segs[:-1])
     for s in segs:
         n = both[s][2]
-        print(f"\n[{s}] {n}프레임" + (f" (곡선 = 반경 {curve_r} m 미만)" if s == "곡선" else ""))
-        for z in (0.2, 0.4):
-            lane = stat(errs[s][f"lane1_{z}"] + errs[s][f"lane2_{z}"])
-            cen = stat(errs[s][f"center_{z}"])
-            mark = "통과" if lane[0] <= GOAL_ERR else "미달"
-            print(f"  옆 오차 {z} m  L1·L2 중앙 {lane[0]*100:.1f} cm / 상위10% {lane[1]*100:.1f} cm [{mark}]"
-                  f"  | 중심선 중앙 {cen[0]*100:.1f} cm / 상위10% {cen[1]*100:.1f} cm")
+        print(f"\n[{s}] {n}프레임" + (f" (곡선 = 반경 {CURVE * lw:.1f} m 미만)" if s == "곡선" else ""))
+        lane, cen = stat(errs[s]["lane1"] + errs[s]["lane2"]), stat(errs[s]["center"])
+        print(f"  옆 오차(차로 폭 대비)  L1·L2 중앙 {lane[0]:.1%} ({lane[0] * lw * 100:.1f} cm) / 상위10% {lane[1]:.1%}"
+              f" [{'통과' if lane[0] <= GOAL_ERR else '미달'}]  | 중심선 중앙 {cen[0]:.1%} / 상위10% {cen[1]:.1%}")
         r = both[s][0] / max(n, 1)
         print(f"  양쪽 선 있음 {r:.0%} [{'통과' if r >= GOAL_BOTH else '미달'}]"
-              f"  | 양쪽 정답(3 cm 이내) {both[s][1] / max(n, 1):.0%}")
+              f"  | 양쪽 정답(차로 폭의 {OK_ERR:.0%} 이내) {both[s][1] / max(both[s][3], 1):.0%} (판정 가능한 {both[s][3]}프레임 중)")
         for role in ("lane1", "lane2", "center"):
             items = sorted((k.split(":")[1], v) for k, v in cls[s].items() if k.startswith(role + ":"))
             print(f"  {role:6s} 판정: " + ", ".join(f"{c} {v}" for c, v in items))

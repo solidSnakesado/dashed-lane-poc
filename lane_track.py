@@ -1,5 +1,4 @@
 """선을 프레임 사이에 이어서 추적하고 차선 번호와 중심선을 정한다 (6단계: 차선 번호, 7단계: 추적).
-
 추적 중인 선은 '최근에 본 점들의 모음'이다. 프레임마다 차량 움직임만큼 점들을 옮기고(lane_motion.py),
 새로 본 점과 겹치는 곳은 칼만 필터로 갱신하고, 안 보인 곳의 점은 잠시(KEEP_SEC) 남겨 둔다.
 """
@@ -109,8 +108,7 @@ class Tracker:
 
     def match(self, lanes):
         """새 선마다 가장 가까운 추적을 찾는다. 한 추적에 여러 선(끊겨 보인 조각들)이 붙을 수 있다."""
-        refs = [extended(t.curve) for t in self.tracks]
-        pairs = []
+        refs, pairs = [extended(t.curve) for t in self.tracks], []
         for li, ln in enumerate(lanes):
             # 차량에 가까운 쪽 절반으로 비교 (먼 쪽은 차량이 조금만 돌아도 크게 어긋남)
             p = ln.sample(1.0)
@@ -144,9 +142,12 @@ class Tracker:
             t.move(rot, vec)
         self.ends = tuple(e @ rot.T + vec for e in self.ends)
 
-    def predict(self, lanes):
-        """차량 움직임을 추정해 추적 중인 선들을 옮긴다. 한 프레임의 추정은 잡음이 크므로, 직전까지의
-        움직임(self.motion)을 먼저 적용하고 이번에 남은 어긋남의 일부(self.gain)만 반영해 천천히 고친다."""
+    def predict(self, lanes, odom=None):
+        """추적 중인 선들을 차량이 움직인 만큼 옮긴다. odom(바퀴 센서로 잰 회전·이동)이 있으면 그 값만 쓴다.
+        없으면 차선으로 추정: 직전까지의 움직임을 먼저 적용하고 남은 어긋남의 일부(self.gain)만 반영한다."""
+        if odom is not None:
+            self.motion, self.seen_along, self.ends = np.r_[odom[0], odom[1]], True, piece_ends(lanes)[:2]
+            return self.shift_all(*odom)
         self.shift_all(self.motion[0], self.motion[1:])
         pairs = self.match(lanes)
         if self.left is not None or self.right is not None:
@@ -165,9 +166,9 @@ class Tracker:
         self.motion = new
         self.ends = piece_ends(lanes)[:2]
 
-    def update(self, lanes):
-        """새 프레임의 선들로 추적을 갱신한다: 움직임 예측 → 대응 → 갱신."""
-        self.predict(lanes)
+    def update(self, lanes, odom=None):
+        """새 프레임의 선들로 추적을 갱신한다: 움직임 반영 → 대응 → 갱신. odom = 밖에서 받은 움직임(없으면 추정)."""
+        self.predict(lanes, odom)
         got = {}
         for ti, li in self.match(lanes):
             got.setdefault(ti, []).append(lanes[li])
@@ -187,7 +188,7 @@ class Tracker:
 
     def roles(self):
         """내 차로의 왼쪽 선(lane1)과 오른쪽 선(lane2)을 고른다. 없으면 None."""
-        self.left, self.right = pick(self.tracks, (self.left, self.right), self.min_hits)
+        self.left, self.right = pick(self.tracks, (self.left, self.right), self.min_hits, self.width)
         self.cross.step((self.left, self.right), abs(self.motion[2]))
         return self.left, self.right
 

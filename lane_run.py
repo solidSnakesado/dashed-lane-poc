@@ -2,9 +2,9 @@
 3 도로 펼치기 → 4 조각 묶기 → 5 곡선 맞춤 → 6 차선 번호 → 7 추적.
 사용법:
     정답 라벨 입력:  python lane_run.py aihub ~/lane/aihub_val ~/lane/aihub_calib --scene 08_100616_220614
-    (같은 주행에 모델 적용: 위 명령에 --weights ~/lane/runs/seg_aihub/weights/best.pt 추가)
     학습 모델 입력:  python lane_run.py video ~/lane/videos/turn.mp4 ~/lane/runs/seg_aihub/weights/best.pt ~/lane/H_drive.npy
     저장한 검출 입력: python lane_run.py dets ~/lane/videos/turn.mp4 turn_dets.json.gz ~/lane/H_drive.npy
+    (핑키: dets 뒤에 --auto --odom gt.csv. 도로 규격은 화면에서 직접 재고, 로봇 움직임은 기록에서 받음)
 """
 import argparse
 import csv
@@ -19,11 +19,12 @@ import numpy as np
 from lane_draw import draw
 from lane_geom import Camera, drop_marks, frame_to_pieces
 from lane_group import build_lanes
+from lane_odom import Odom
+from lane_params import Auto
 from lane_track import Tracker
 
 # AI 허브 클래스 이름 → 이 프로젝트의 클래스 이름 (YOLO 학습 클래스와 같음)
-AIHUB_CLASS = {"whiteLane": "white_lane", "stopLane": "stop_line",
-               "crossWalk": "crosswalk", "roadMark": "road_mark"}
+AIHUB_CLASS = {"whiteLane": "white_lane", "stopLane": "stop_line", "crossWalk": "crosswalk", "roadMark": "road_mark"}
 AIHUB_FPS = 2       # AI 허브 프레임 간격은 약 0.5초
 
 
@@ -104,16 +105,16 @@ def dets_frames(path, dets_path, calib, conf):
     return gen(), Camera(calib), d["fps"] / d["stride"], len(d["frames"])
 
 
-def csv_rows(name, tracks, left, right, center):
-    """한 프레임의 선과 중심선을 CSV 행으로 만든다. 점은 2m 간격."""
+def csv_rows(name, tracks, left, right, center, u=1.0):
+    """한 프레임의 선과 중심선을 CSV 행으로 만든다. 점은 2m 간격. u = 좌표를 실제 m로 되돌리는 나눗수."""
     rows = []
     for t in tracks:
         role = "lane1" if t is left else "lane2" if t is right else "other"
         for k, (x, z) in enumerate(t.curve.sample(2.0)):
-            rows.append([name, role, t.id, t.kind, int(t.det is not None), k, f"{x:.3f}", f"{z:.3f}"])
+            rows.append([name, role, t.id, t.kind, int(t.det is not None), k, f"{x / u:.4f}", f"{z / u:.4f}"])
     if center is not None:
         for k, (x, z) in enumerate(center[0].sample(2.0)):
-            rows.append([name, "center", -1, "", int(not center[1]), k, f"{x:.3f}", f"{z:.3f}"])
+            rows.append([name, "center", -1, "", int(not center[1]), k, f"{x / u:.4f}", f"{z / u:.4f}"])
     return rows
 
 
@@ -121,20 +122,21 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="mode", required=True)
     a = sub.add_parser("aihub", help="AI 허브 정답 라벨로 실행")
-    a.add_argument("root", help="추출한 AI 허브 폴더 (images, labels가 들어 있는 곳)")
-    a.add_argument("calib_dir", help="aihub_calib.py가 만든 보정 폴더")
+    a.add_argument("root", help="추출한 AI 허브 폴더"), a.add_argument("calib_dir", help="aihub_calib.py가 만든 보정 폴더")
     a.add_argument("--scene", required=True, help="주행 이름 (예: 08_100616_220614)")
     a.add_argument("--weights", default="", help="주면 정답 라벨 대신 이 모델의 검출 결과를 씀")
     a.add_argument("--conf", type=float, default=0.25, help="검출 신뢰도 기준")
     v = sub.add_parser("video", help="영상에 학습 모델을 적용해 실행")
     v.add_argument("video"), v.add_argument("weights"), v.add_argument("calib", help="H 행렬(.npy) 또는 보정(.npz)")
     v.add_argument("--stride", type=int, default=1, help="몇 프레임마다 한 장씩 처리할지")
-    v.add_argument("--start", type=float, default=0, help="시작 시각(초)")
-    v.add_argument("--end", type=float, default=0, help="끝 시각(초), 0이면 끝까지")
+    v.add_argument("--start", type=float, default=0, help="시작 시각(초)"), v.add_argument("--end", type=float, default=0)
     v.add_argument("--conf", type=float, default=0.25, help="검출 신뢰도 기준")
     d = sub.add_parser("dets", help="dump_dets.py로 저장한 검출 결과로 실행 (모델 불필요)")
     d.add_argument("video"), d.add_argument("dets"), d.add_argument("calib")
     d.add_argument("--conf", type=float, default=0.25, help="검출 신뢰도 기준")
+    d.add_argument("--odom", default="", help="로봇 움직임 기록(sim_drive.py의 gt.csv). 주면 움직임을 추정하지 않음")
+    d.add_argument("--odom-noise", type=float, default=0.0, help="움직임 값에 섞을 오차 비율 (시험용, 예: 0.02)")
+    d.add_argument("--auto", action="store_true", help="도로 규격을 화면에서 직접 재서 기준값을 맞춤 (보정 파일은 실제 m 단위)")
     for p in (v, d):
         p.add_argument("--all-classes", action="store_true", help="정지선·횡단보도·노면표시도 함께 쓰기 (기본: 차선만)")
     for p in (a, v, d):
@@ -146,54 +148,52 @@ def main():
                                                ex(args.weights), args.conf)
         tag = args.scene + ("_model" if args.weights else "")
     else:
-        if args.mode == "video":
-            frames, cam, fps, total = video_frames(ex(args.video), ex(args.weights), ex(args.calib),
-                                                   args.stride, args.start, args.end, args.conf)
-        else:
-            frames, cam, fps, total = dets_frames(ex(args.video), ex(args.dets), ex(args.calib), args.conf)
+        frames, cam, fps, total = (video_frames(ex(args.video), ex(args.weights), ex(args.calib), args.stride, args.start,
+                                                args.end, args.conf) if args.mode == "video" else
+                                   dets_frames(ex(args.video), ex(args.dets), ex(args.calib), args.conf))
         tag = os.path.splitext(os.path.basename(args.video))[0]
     print(f"{tag}: 약 {total}프레임, 초당 {fps:.1f}장")
 
     tracker, writer, rows = Tracker(fps), None, []
-    stat, n_piece, n_lane = {"both": 0, "one": 0, "none": 0}, 0, 0
-    seen_cls = {}                                           # 클래스별 입력 폴리곤 수
+    odom = Odom(ex(args.odom), ex(args.calib), args.odom_noise) if getattr(args, "odom", "") else None
+    stat, n_piece, n_lane, seen_cls = {"both": 0, "one": 0, "none": 0}, 0, 0, {}   # seen_cls = 클래스별 입력 폴리곤 수
     base = os.path.join(ex(args.out), f"lane_{tag}")
     lane_only = args.mode != "aihub" and not args.all_classes
+    auto, unit = None, 1.0                                  # unit = 후처리 좌표 ÷ 실제 m (규격을 직접 잴 때만 1이 아님)
     for i, (name, img, polys) in enumerate(frames):
         polys = drop_marks(polys) if lane_only else polys   # 차선만 남기고, 바닥 표시와 겹친 것은 뺌
+        if getattr(args, "auto", False):                    # 규격 측정. 차로 폭이 측정되기 전 프레임은 선을 그리지 않음
+            auto = auto or Auto(ex(args.calib), img.shape[1::-1])
+            polys = polys if auto.feed(polys, cam, name) else []
+            unit = auto.scale or 1.0
+            odom and setattr(odom, "scale", unit)           # 움직임 값도 같은 단위로
         for cls, _ in polys:
             seen_cls[cls] = seen_cls.get(cls, 0) + 1
         pieces, others = frame_to_pieces(polys, cam)        # 3단계
         lanes = build_lanes(pieces)                         # 4~5단계
-        tracks = tracker.update(lanes)                      # 7단계
+        tracks = (lambda mv: tracker.update(lanes, mv) if polys or not auto else [])(odom.step(name) if odom else None)   # 7단계
         left, right = tracker.roles()                       # 6단계
-        pts, guess = tracker.center(left, right)
-        center = None if pts is None else (pts, guess)
+        center = (lambda c: None if c[0] is None else c)(tracker.center(left, right))
         stat["both" if left and right else "one" if left or right else "none"] += 1
         n_piece, n_lane = n_piece + len(pieces), n_lane + len(lanes)
         ids = f"L1={left.id if left else '-'} L2={right.id if right else '-'}"
         frame = draw(img, polys, tracks, left, right, center, others, cam,
                      f"{name}  pieces={len(pieces)} lanes={len(lanes)} tracks={len(tracks)} {ids}")
         if writer is None:
-            writer = cv2.VideoWriter(base + ".mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps,
-                                     (frame.shape[1], frame.shape[0]))
+            writer = cv2.VideoWriter(base + ".mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, frame.shape[1::-1])
         writer.write(frame)
-        if i == total // 2:                                 # 가운데 프레임은 그림으로도 저장
-            cv2.imwrite(base + ".jpg", frame)
-        rows += csv_rows(name, tracks, left, right, center)
+        _ = i == total // 2 and cv2.imwrite(base + ".jpg", frame)   # 가운데 프레임은 그림으로도 저장
+        rows += csv_rows(name, tracks, left, right, center, unit)
         if args.mode == "aihub" or i % 100 == 0:
             print(f"  {name}: 조각 {len(pieces)} → 선 {len(lanes)} → 추적 {len(tracks)}, {ids}", flush=True)
     writer.release()
     with open(base + ".csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["frame", "role", "track_id", "kind", "seen", "idx", "x_m", "z_m"])
-        w.writerows(rows)
+        csv.writer(f).writerows([["frame", "role", "track_id", "kind", "seen", "idx", "x_m", "z_m"]] + rows)
     n = max(sum(stat.values()), 1)
     print("입력 폴리곤(프레임당 평균): " + ", ".join(f"{k} {c / n:.1f}" for k, c in sorted(seen_cls.items())))
-    print(f"처리 {n}프레임, 프레임당 평균 조각 {n_piece / n:.1f}개 → 선 {n_lane / n:.1f}개")
-    print(f"양쪽 선 모두 있음 {stat['both']}프레임, 한쪽만 {stat['one']}, 없음 {stat['none']}")
-    print(f"추적 번호를 새로 만든 횟수: {tracker.next_id}")
-    print(f"저장: {base}.mp4 / .jpg / .csv")
+    print(f"처리 {n}프레임, 프레임당 평균 조각 {n_piece / n:.1f}개 → 선 {n_lane / n:.1f}개\n"
+          f"양쪽 선 모두 있음 {stat['both']}프레임, 한쪽만 {stat['one']}, 없음 {stat['none']}")
+    print(f"추적 번호를 새로 만든 횟수: {tracker.next_id}\n저장: {base}.mp4 / .jpg / .csv")
 
 
 if __name__ == "__main__":
