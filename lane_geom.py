@@ -45,6 +45,8 @@ class Camera:
     def to_image(self, g):
         """바닥 좌표 (N,2) → 픽셀 좌표 (N,2). 결과 그림에 곡선을 그릴 때 쓴다."""
         g = np.asarray(g, np.float64).reshape(-1, 2)
+        if len(g) == 0:                                  # 그릴 점이 없으면 빈 결과
+            return np.zeros((0, 2))
         u = np.c_[g, np.ones(len(g))] @ self.Hinv.T
         u = u[:, :2] / u[:, 2:3]
         if self.K is None:

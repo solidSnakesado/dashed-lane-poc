@@ -3,10 +3,10 @@ import numpy as np
 
 from lane_motion import Path, nearest
 
-ROLE_LEN = 5.0        # 내 차로 선으로 인정하는 최소 길이(m)
+ROLE_LEN = 3.0        # 내 차로 선으로 인정하는 최소 길이(m)
 ROLE_TURN = 30.0      # 내 차로 선은 차량 진행 방향과 이 각(도) 안으로 나란해야 함 (가로지르는 유도선 제외)
 ROLE_MARGIN = 1.0     # 내 차로 선을 다른 선으로 바꾸려면 이만큼(m) 더 가까워야 함
-Z_REF = 10.0          # 차선 번호를 정하는 기준 거리(차량 앞, m)
+Z_REF = 4.0           # 차선 번호를 정하는 기준 거리(차량 앞, m)
 MAX_SIDE = 3.5        # 내 차로 경계로 인정하는 최대 옆 거리(m)
 
 
@@ -42,8 +42,11 @@ def pick(tracks, prev, min_hits):
     for side in (0, 1):
         best = min(cand[side], key=lambda c: c[0], default=None)
         keep = next((c for c in cand[side] if c[1] is prev[side]), None)
-        # 직전 선이 잠깐 안 보이는 중이면 그대로 두고, 보이는 중이면 다른 선이 뚜렷이 더 가까울 때만 바꿈
-        if keep is not None and (keep[1].det is None or best[0] > keep[0] - ROLE_MARGIN):
+        # 직전 선이 잠깐 안 보이는 중이면(다른 보이는 선도 없을 때) 그대로 두고, 보이는 중이면 다른 선이 뚜렷이 더 가까울 때만 바꿈
+        seen = [c for c in cand[side] if c[1].det is not None]
+        if keep is not None and keep[1].det is None and seen:     # 직전 선은 안 보이는데 지금 보이는 선이 있으면 그 선으로
+            best = min(seen, key=lambda c: c[0])
+        elif keep is not None and (keep[1].det is None or best[0] > keep[0] - ROLE_MARGIN):
             best = keep
         out.append(best[1] if best else None)
     return out[0], out[1]

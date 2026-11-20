@@ -4,7 +4,8 @@
 
 사용법:
     python dump_dets.py ~/lane/videos/turn.mp4 ~/lane/runs/seg_aihub/weights/best.pt
-결과: 다운로드 폴더에 <영상이름>_dets.json.gz
+결과: --out 폴더(기본: 윈도우 다운로드 폴더)에 <영상이름>_dets.json.gz
+핑키 모델: python dump_dets.py drive.mp4 best.pt --stride 1 --imgsz 640 --out 결과폴더
 """
 import argparse
 import gzip
@@ -23,6 +24,7 @@ def main():
     ap.add_argument("--end", type=float, default=0, help="끝 시각(초), 0이면 끝까지")
     ap.add_argument("--conf", type=float, default=0.10,
                     help="저장할 최소 신뢰도. 낮게 저장해 두고 후처리에서 기준을 다시 고른다")
+    ap.add_argument("--imgsz", type=int, default=960, help="모델 입력 크기. 학습 때와 같게(AI 허브 960, 핑키 640)")
     ap.add_argument("--out", default="/mnt/c/Users/Snake/Downloads", help="결과 저장 폴더")
     args = ap.parse_args()
     video = os.path.expanduser(args.video)
@@ -42,7 +44,7 @@ def main():
         if (k - first) % args.stride:
             continue
         # retina_masks: 마스크를 원본 해상도로 만들어 가는 선의 윤곽을 살림
-        r = model.predict(img, imgsz=960, conf=args.conf, retina_masks=True, verbose=False)[0]
+        r = model.predict(img, imgsz=args.imgsz, conf=args.conf, retina_masks=True, verbose=False)[0]
         polys = []
         if r.masks is not None:
             cls = r.boxes.cls.cpu().numpy().astype(int)
