@@ -17,6 +17,7 @@ from lane_measure import Measure
 
 REF = {"lane_w": 3.3, "dash": 3.0, "gap": 5.0, "line_w": 0.15}   # 기준 규격(m)
 SIDE = 0.75        # 기준 거리: 좌우로 차로 폭의 이 배수 지점이 화면에 함께 보이는 가장 가까운 거리
+KEEP_K, HOLD_K = 1.0, 0.5   # 안 보이는 점은 점선 한 주기(점선+간격)를 달릴 동안, 통째로 안 보이는 내 차로 선은 반 주기 동안 유지
 YAW_TOL = 20.0     # 차로 선이 진행 방향과 벌어질 수 있는 기본 각(도): 차로 안에서 비스듬히 달리는 경우
 
 
@@ -58,8 +59,8 @@ def derive(spec, scale, cam, size):
                      "SOLID_LEN": 8.0 * rd, "CHAIN_TRUST": 2.5 * rd, "DIR_NOISE": 0.2 * rt,
                      "AHEAD": far / 3, "FAR_W": far / 2},
         lane_motion: {"END_GATE": 2.5 * rp, "EXTEND": 8.0 * rp, "REACH_MAX": far * 5 / 6, "AHEAD": far / 3},
-        lane_track: {"KEEP_Z": far / 4, "MIN_NEW": 2.0 * rd},
-        lane_roles: {"ROLE_LEN": d, "PAIR_LEN": d / 3},
+        lane_track: {"KEEP_Z": far / 4, "MIN_NEW": 2.0 * rd, "KEEP_DIST": KEEP_K * (d + g), "HOLD_DIST": HOLD_K * (d + g)},
+        lane_roles: {"ROLE_LEN": d, "PAIR_LEN": d / 3, "SIDE_Z": 0.0},
     }
     if near is not None:
         out[lane_roles]["Z_REF"] = near

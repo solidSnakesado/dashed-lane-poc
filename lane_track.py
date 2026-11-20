@@ -17,6 +17,7 @@ MOTION_SEC = 0.15     # 차량 움직임 추정을 고쳐 나가는 시간 상�
 MOTION_MAX = np.array([np.radians(40.0), 3.0, 45.0])   # 1초에 가능한 최대 회전(rad)·옆 이동(m)·앞뒤 이동(m)
 R_MEAS = 0.10         # 한 번 측정의 오차(m²)
 KEEP_SEC = 1.0        # 안 보이는 점을 유지하는 시간(초). KEEP_Z보다 먼 점은 거리에 반비례해 짧게
+KEEP_DIST, HOLD_DIST = 8.0, 4.0   # 움직임 값을 받을 때: 안 보이는 점·내 차로 선을 이 거리(m)를 달릴 동안 유지 (점선 주기의 1배, 0.5배)
 KEEP_Z = 15.0         # 먼 점일수록 움직임 추정 오차가 크게 쌓이므로 빨리 버림
 HOLD_SEC, HOLD_LEN = 1.0, 30.0   # 내 차로 선은 통째로 안 보여도 이 시간(초) 동안, 앞으로 이 거리(m)까지 이어서 유지
 END_GATE, END_TURN = 0.6, 20.0   # 선 끝 너머에 있는 조각을 붙일 때의 거리(m)·방향 차(도) 한계
@@ -24,8 +25,7 @@ MIN_NEW = 2.0         # 이보다 짧고 조각 하나뿐인 선은 새 추적 �
 ROLE_SEC = 0.15       # 내 차로 선으로 인정하려면 이 시간(초) 이상 보였어야 함
 ROLE_BIAS = 0.5       # 대응 찾을 때 내 차로 선에 주는 우선권(m)
 MATCH_TURN = 30.0     # 추적 중인 선과 방향이 이 각(도) 넘게 다른 조각은 붙이지 않음
-Z_BACK = -3.0         # 차량 뒤로 이만큼(m) 넘어간 점은 버림
-DEFAULT_WIDTH = 3.3   # 한쪽 선만 보일 때 쓰는 차로 폭 초기값(m)
+Z_BACK, DEFAULT_WIDTH = -3.0, 3.3   # 차량 뒤로 이만큼(m) 넘어간 점은 버림 / 한쪽 선만 보일 때 쓰는 차로 폭 초기값(m)
 
 
 class Track:
@@ -51,13 +51,13 @@ class Track:
         if self.tip is not None:                     # 끝 방향도 차량이 돈 만큼 돌림
             self.tip = self.tip - np.array([np.arctan2(rot[1, 0], rot[0, 0]), 0.0, 0.0])
 
-    def update(self, lanes, q, keep, hold=0, bridge=False):
+    def update(self, lanes, q, keep, hold=0, bridge=False, step=1):
         """이번 프레임에 이 선으로 대응된 선들(없으면 빈 목록)로 갱신한다. 점이 남지 않으면 False.
 
         hold > 0이면 내 차로 선이다: 통째로 안 보이는 동안 hold 프레임까지 유지하고 앞으로 이어 붙인다(예측선).
         bridge면 교차로 구간이다: 점을 버리지 않고 예측선을 계속 유지한다(건너편 차선에 붙은 뒤에도)."""
         self.var += q
-        self.age = self.age + 1
+        self.age = self.age + step                   # step = 1프레임, 또는 (움직임 값을 받을 때) 이번에 달린 거리
         if lanes:
             new = np.vstack([ln.sample(1.0) for ln in lanes])
             ref = self.curve.sample(0.25)
@@ -100,7 +100,7 @@ class Tracker:
         self.q, self.fps, self.tracks, self.next_id, self.width = Q_RATE / fps, fps, [], 0, DEFAULT_WIDTH
         self.keep, self.min_hits, self.hold = (max(int(round(v * fps)), 1) for v in (KEEP_SEC, ROLE_SEC, HOLD_SEC))
         self.ends = (np.zeros((0, 2)), np.zeros((0, 2)))     # 직전 프레임의 조각 시작점·끝점
-        self.left = self.right = None                        # 직전의 내 차로 선
+        self.left, self.right, self.by_odom = None, None, False   # 직전의 내 차로 선, 움직임 값을 밖에서 받는 중인지
         self.cross = Crossing(fps)                           # 교차로 구간 상태 (lane_cross.py)
         self.motion, self.seen_along = np.zeros(3), False    # 프레임당 움직임(회전, 옆, 앞뒤), 앞뒤 근거 유무
         # 이번 프레임의 어긋남을 반영하는 비율, 한 프레임에 가능한 최대 움직임
@@ -146,7 +146,7 @@ class Tracker:
         """추적 중인 선들을 차량이 움직인 만큼 옮긴다. odom(바퀴 센서로 잰 회전·이동)이 있으면 그 값만 쓴다.
         없으면 차선으로 추정: 직전까지의 움직임을 먼저 적용하고 남은 어긋남의 일부(self.gain)만 반영한다."""
         if odom is not None:
-            self.motion, self.seen_along, self.ends = np.r_[odom[0], odom[1]], True, piece_ends(lanes)[:2]
+            self.motion, self.seen_along, self.ends, self.by_odom = np.r_[odom[0], odom[1]], True, piece_ends(lanes)[:2], True
             return self.shift_all(*odom)
         self.shift_all(self.motion[0], self.motion[1:])
         pairs = self.match(lanes)
@@ -170,13 +170,13 @@ class Tracker:
         """새 프레임의 선들로 추적을 갱신한다: 움직임 반영 → 대응 → 갱신. odom = 밖에서 받은 움직임(없으면 추정)."""
         self.predict(lanes, odom)
         got = {}
-        for ti, li in self.match(lanes):
-            got.setdefault(ti, []).append(lanes[li])
-        used = {id(ln) for v in got.values() for ln in v}
-        # 앞뒤 이동을 모르면(끝점 근거 부족) 안 보인 점을 남겨 두지 않음: 잘못된 자리에 남기 때문
-        keep = self.keep if self.seen_along else 0
+        _ = [got.setdefault(ti, []).append(lanes[li]) for ti, li in self.match(lanes)]
+        used = {id(ln) for v in got.values() for ln in v}   # 아래 keep: 앞뒤 이동을 모르면 안 보인 점을 남기지 않음
+        keep, hold, step = (self.keep if self.seen_along else 0), self.hold, 1
+        if self.by_odom:   # 움직임 값을 받으면 '시간'이 아니라 '달린 거리'로 기억을 지움 (속도와 무관, 서 있으면 유지)
+            keep, hold, step = KEEP_DIST, HOLD_DIST, float(np.linalg.norm(self.motion[1:]))
         self.tracks = [t for ti, t in enumerate(self.tracks) if t.update(
-            got.get(ti, []), self.q, keep, *self.cross.hold(t is self.left or t is self.right, self.hold))]
+            got.get(ti, []), self.q, keep, *self.cross.hold(t is self.left or t is self.right, hold), step)]
         shift = common([(t.sm, t.curve) for t in self.tracks])   # 모든 선이 함께 움직인 양은 그대로 따라감
         for t in self.tracks:                                    # 선마다 따로 흔들리는 부분만 평활
             t.sm, t.curve = smooth(t.sm, t.curve, self.fps, shift)

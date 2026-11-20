@@ -7,6 +7,7 @@ ROLE_LEN = 3.0        # 내 차로 선으로 인정하는 최소 길이(m)
 ROLE_TURN = 45.0      # 내 차로 선은 차량 진행 방향과 이 각(도) 안으로 나란해야 함 (가로지르는 유도선 제외)
 ROLE_MARGIN = 1.0     # 내 차로 선을 다른 선으로 바꾸려면 이만큼(m) 더 가까워야 함
 Z_REF = 4.0           # 차선 번호를 정하는 기준 거리(차량 앞, m)
+SIDE_Z = None         # 좌우를 가르는 거리(m). None이면 Z_REF. 핑키는 0(카메라 바로 아래): 앞쪽에서는 굽은 길·비스듬한 자세로 좌우가 뒤집힘
 MAX_SIDE = 3.5        # 내 차로 경계로 인정하는 최대 옆 거리(m)
 PAIR_LEN = 1.0        # 차로 폭으로 찾는 반대쪽 선의 최소 길이(m)
 PAIR_TOL = 0.8        # 차로 폭과 이만큼(m) 안으로 맞아야 반대쪽 선으로 인정
@@ -49,7 +50,7 @@ def fill(tracks, left, right, min_hits, width):
     want = 1 if right is None else -1                    # 비어 있는 쪽 (+1 = 오른쪽)
     if want in best:
         return (a, best[want][1]) if want == 1 else (best[want][1], a)
-    xa = x_at(a.curve, Z_REF)
+    xa = x_at(a.curve, Z_REF if SIDE_Z is None else SIDE_Z)
     if -want in best and xa is not None and abs(xa) < PAIR_MID:
         return (best[-want][1], a) if want == 1 else (a, best[-want][1])
     return left, right
@@ -67,8 +68,10 @@ def pick(tracks, prev, min_hits, width=3.3):
             continue
         if x0 is not None and x1 is not None and abs(np.degrees(np.arctan2(x1 - x0, 6.0))) > ROLE_TURN:
             continue
-        if -MAX_SIDE < x < MAX_SIDE:
-            cand[0 if x < 0 else 1].append((abs(x), t))
+        xs = x if SIDE_Z is None else x_at(t.curve, SIDE_Z)    # 좌우는 차량이 실제로 있는 자리 기준으로 가름
+        xs = x if xs is None else xs
+        if -MAX_SIDE < xs < MAX_SIDE:
+            cand[0 if xs < 0 else 1].append((abs(xs), t))
     out = []
     for side in (0, 1):
         best = min(cand[side], key=lambda c: c[0], default=None)
