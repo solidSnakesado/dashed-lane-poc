@@ -1,0 +1,10 @@
+# 핑키 차선 프로젝트 파이썬 패키지 (리눅스 PC, 젯슨 공통). 가상 환경: python3 -m venv --system-site-packages ~/venvs/lane
+# PyTorch는 장비마다 따로 먼저 설치한다.
+#   리눅스 PC(x86, RTX 3050 Ti): pip install ultralytics가 자동으로 설치 (torch 2.15.0)
+#   젯슨(JetPack 7.2, CUDA 13.2): pip install torch torchvision --index-url https://download.pytorch.org/whl/cu132
+ultralytics==8.4.215
+numpy<2
+opencv-python==4.11.0.86
+mujoco==3.6.0
+pyyaml
+setuptools<80
