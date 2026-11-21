@@ -7,7 +7,8 @@
 """
 import numpy as np
 
-from lane_group import AHEAD, Curve
+import lane_curve
+from lane_curve import Curve
 
 MOTION_GATE = 3.0     # 옆 이동·회전 추정에 쓰는 점 쌍의 최대 거리(m)
 END_GATE = 2.5        # 같은 조각 끝점으로 볼 최대 거리(m)
@@ -16,6 +17,7 @@ EXTEND = 8.0          # 대응 찾을 때 선의 양 끝을 늘려 보는 거리
 SMOOTH_SEC = 0.25     # 최종 곡선을 평활하는 시간 상수(초). 클수록 덜 떨리지만 변화에 늦게 따라감
 TIP_SEC = 0.6         # 선 끝의 방향·휘는 정도·그릴 거리를 평활하는 시간 상수(초). 클수록 끝이 덜 흔들림
 REACH_MAX = 50.0      # 앞으로 이어 그리는 최대 거리(m)
+TIP_KAPPA = 0.05      # 선 끝의 휘는 정도 한계(1/m). 0.05 = 반경 20 m
 JUMP = 1.0            # 평활 전후 차이가 이보다 크면(m) 선이 바뀐 것으로 보고 새 값으로 바로 바꿈
 
 
@@ -161,14 +163,14 @@ def tip_of(curve):
     """
     p = curve.sample(0.5)
     z = p[:, 1]
-    reach = min(z[-1] + min(AHEAD, curve.length), REACH_MAX)
+    reach = min(z[-1] + min(lane_curve.AHEAD, curve.length), REACH_MAX)
     if curve.length < 5 or np.any(np.diff(z) <= 0):
         return np.array([curve.heading(curve.length), 0.0, reach])
     deg = 2 if curve.length >= 12 else 1
     c = np.polyfit(z, p[:, 0], deg, w=1.0 / (1.0 + (z / 30.0) ** 2))
     slope = np.polyval(np.polyder(c), z[-1])
     kappa = 2 * c[0] / (1 + slope ** 2) ** 1.5 if deg == 2 else 0.0
-    return np.array([np.arctan(slope), np.clip(kappa, -0.05, 0.05), reach])
+    return np.array([np.arctan(slope), np.clip(kappa, -TIP_KAPPA, TIP_KAPPA), reach])
 
 
 def blend_tip(old, curve, fps):

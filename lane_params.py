@@ -8,6 +8,7 @@
 """
 import numpy as np
 
+import lane_curve
 import lane_geom
 import lane_group
 import lane_motion
@@ -18,6 +19,10 @@ from lane_measure import Measure
 REF = {"lane_w": 3.3, "dash": 3.0, "gap": 5.0, "line_w": 0.15}   # 기준 규격(m)
 SIDE = 0.75        # 기준 거리: 좌우로 차로 폭의 이 배수 지점이 화면에 함께 보이는 가장 가까운 거리
 KEEP_K, HOLD_K = 1.0, 0.5   # 안 보이는 점은 점선 한 주기(점선+간격)를 달릴 동안, 통째로 안 보이는 내 차로 선은 반 주기 동안 유지
+LOCK_N = 15        # 차로 폭 측정이 이만큼 모이면 좌표 단위를 고정
+NEAR = 10.0        # 카메라 높이의 이 배수까지를 위치를 믿을 수 있는 거리로 봄 (lane_measure.GRAZE와 같은 기준)
+GRAZE = 20.0       # 카메라 높이의 이 배수보다 먼 바닥은 쓰지 않음 (바닥과 이루는 각이 약 3도보다 작아 위치 오차가 큼)
+KAPPA = 2.0 / REF["lane_w"]   # 선이 휘는 정도의 한계: 반경이 차로 폭의 절반보다 작은 선은 없다고 봄
 YAW_TOL = 20.0     # 차로 선이 진행 방향과 벌어질 수 있는 기본 각(도): 차로 안에서 비스듬히 달리는 경우
 
 
@@ -51,15 +56,21 @@ def derive(spec, scale, cam, size):
     d, g, t = get("dash"), get("gap"), get("line_w")
     rad = spec["min_radius"] * scale / 1000.0 if spec.get("min_radius") else None
     near, far = view(cam, size, d)
+    if spec.get("cam_h"):          # 카메라 높이의 GRAZE배보다 먼 바닥은 너무 비스듬히 보여 위치를 믿지 않음 (선 끝이 휘는 원인)
+        far = min(far, GRAZE * spec["cam_h"] * scale / 1000.0)
     rd, rg, rt, rp = d / REF["dash"], g / REF["gap"], t / REF["line_w"], (d + g) / (REF["dash"] + REF["gap"])
     out = {
         lane_geom: {"MAX_WIDTH": 1.0 * rt, "MIN_LEN": 0.4 * rd, "SHORT_LEN": 1.2 * rd, "DIR_SPAN": 3.0 * rd,
                     "Z_MAX": far},
         lane_group: {"MAX_GAP": 15.0 * (2 * g + d) / (2 * REF["gap"] + REF["dash"]), "SHORT_GAP": 3.0 * rg,
                      "SOLID_LEN": 8.0 * rd, "CHAIN_TRUST": 2.5 * rd, "DIR_NOISE": 0.2 * rt,
-                     "AHEAD": far / 3, "FAR_W": far / 2},
-        lane_motion: {"END_GATE": 2.5 * rp, "EXTEND": 8.0 * rp, "REACH_MAX": far * 5 / 6, "AHEAD": far / 3},
-        lane_track: {"KEEP_Z": far / 4, "MIN_NEW": 2.0 * rd, "KEEP_DIST": KEEP_K * (d + g), "HOLD_DIST": HOLD_K * (d + g)},
+                     },
+        lane_curve: {"AHEAD": far / 3, "FAR_W": far / 2,
+                     "LOCAL_FIT": 1.0, "FIT_SPAN": (d + g) / 2, "KAPPA_MAX": KAPPA},   # 급한 곡선도 따라 휘게
+        lane_motion: {"END_GATE": 2.5 * rp, "EXTEND": 8.0 * rp, "REACH_MAX": far * 5 / 6, "TIP_KAPPA": KAPPA},
+        lane_track: {"KEEP_Z": far / 4, "MIN_NEW": 2.0 * rd, "KEEP_DIST": KEEP_K * (d + g), "HOLD_DIST": HOLD_K * (d + g),
+                     "R_MEAS": 1e-3, "HOLD_LEN": 0.0,   # HOLD_LEN 0: 안 보이는 구간을 앞으로 이어 붙이지 않음(예측하지 않음)
+                     **({"NEAR_KEEP": NEAR * spec["cam_h"] * scale / 1000.0} if spec.get("cam_h") else {})},   # 새로 본 위치를 그대로 씀: 예전 기억은 더 멀리서 본 것이라 덜 정확함
         lane_roles: {"ROLE_LEN": d, "PAIR_LEN": d / 3, "SIDE_Z": 0.0},
     }
     if near is not None:
@@ -90,19 +101,20 @@ class Auto:
     def __init__(self, calib_path, size):
         self.real, self.size = lane_geom.Camera(calib_path), size      # 실제 m 단위 카메라(측정용)
         d = np.load(calib_path)
-        self.m = Measure(self.real, size, float(d["cam_h"]) if "cam_h" in d else None)
+        self.cam_h = float(d["cam_h"]) * 1000.0 if "cam_h" in d else None       # 카메라 높이(mm)
+        self.m = Measure(self.real, size, self.cam_h and self.cam_h / 1000.0)
         self.scale, self.known = None, 0
 
     def feed(self, polys, cam, name=""):
         """한 프레임의 차선 폴리곤을 측정에 넣는다. 좌표 단위가 정해졌으면 True (그때부터 후처리를 돌림)."""
         self.m.add([p for cls, p in polys if cls == "white_lane"])
         spec = self.m.spec()
-        if self.scale is None and "lane_w" in spec:
+        if self.scale is None and len(self.m.vals["lane_w"]) >= LOCK_N:   # 처음 몇 개의 측정은 치우치기 쉬워 더 모은 뒤 고정
             self.scale = REF["lane_w"] / spec["lane_w"]
             cam.H = np.diag([self.scale, self.scale, 1.0]) @ self.real.H
             cam.Hinv = np.linalg.inv(cam.H)
             print(f"  {name}: 차로 폭 {spec['lane_w'] * 1000:.0f} mm로 측정 → 좌표 단위 고정")
         if self.scale is not None and len(spec) != self.known:          # 새로 측정된 항목이 생기면 기준값 갱신
             self.known = len(spec)
-            apply({k: v * 1000.0 for k, v in spec.items()}, self.scale, cam, self.size)
+            apply({**{k: v * 1000.0 for k, v in spec.items()}, "cam_h": self.cam_h}, self.scale, cam, self.size)
         return self.scale is not None

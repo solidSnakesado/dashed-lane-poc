@@ -16,16 +16,20 @@ import cv2
 import numpy as np
 import yaml
 
+from gen_roads import offset, strip
 from scene import Scene, overlay
 
 LATERAL_MM, YAW_DEG = 60, 15     # 차로 중심에서 벗어나는 범위
 EMPTY_KEEP = 0.1                 # 라벨이 하나도 없는 화면은 이 비율만 남김
 MIN_AREA = 25                    # 이보다 작은 조각(픽셀)은 라벨에서 뺌
+EGO = ["ego_left", "ego_right", "ego_center"]  # 내 차로의 왼쪽 선·오른쪽 선·중심선 (점선의 빈 구간도 이어진 한 줄)
+EGO_ID = {str(k + 1): n for k, n in enumerate(EGO)}  # 내 차로 선 그림의 값 → 클래스 이름
 
 
 def pick_pose(paths, rng, center=None):
     """경로 하나의 한 지점을 고르고 좌우 위치·방향을 흔든다. (x, y, yaw) [m, rad]"""
-    p = np.asarray(paths[rng.integers(len(paths))]) / 1000.0
+    pi = int(rng.integers(len(paths)))
+    p = np.asarray(paths[pi]) / 1000.0
     i = rng.integers(5, max(6, int(len(p) * 0.85)))
     if center is not None and rng.random() < 0.5:           # 교차로: 절반은 정지선·횡단보도가 보이는 진입 구간에서
         d = np.linalg.norm(p - center, axis=1)
@@ -36,7 +40,22 @@ def pick_pose(paths, rng, center=None):
     yaw = np.arctan2(d[1], d[0])
     side = rng.uniform(-LATERAL_MM, LATERAL_MM) / 1000.0
     x, y = p[i] + side * np.array([-np.sin(yaw), np.cos(yaw)])
-    return x, y, yaw + np.radians(rng.uniform(-YAW_DEG, YAW_DEG))
+    return x, y, yaw + np.radians(rng.uniform(-YAW_DEG, YAW_DEG)), pi
+
+
+def ego_floor(sc, pi):
+    """경로 pi를 달릴 때의 내 차로 양쪽 선과 중심선을 바닥 그림에 그린다 (1 = 왼쪽, 2 = 오른쪽, 3 = 중심).
+
+    차로 중심 경로에서 좌우로 차로 폭의 절반만큼 옮긴 선을 선 굵기의 띠로 그린다. 점선이어도 끊지 않는다.
+    그 경계에 선이 아예 없는 도로(바깥 경계선 없음)는 그 선을 그리지 않는다. 중심선은 항상 그린다(바닥에 칠해진 선이 아님)."""
+    info, floor = sc.info, np.zeros(sc.inst.shape, np.uint16)
+    p, half, t = np.asarray(info["paths"][pi], float), info["lane_w"] / 2, info.get("line_w", 10.0)
+    right = info.get("path_right", [True] * len(info["paths"]))[pi]
+    for k, (d, ok) in enumerate(((half, True), (-half, right), (0.0, True)), start=1):
+        if ok:
+            b = strip(offset(p, d), t)
+            cv2.fillPoly(floor, [np.c_[b[:, 0] * sc.ppm, floor.shape[0] - b[:, 1] * sc.ppm].round().astype(np.int32)], k)
+    return floor
 
 
 def background(h, w, rng):
@@ -112,7 +131,7 @@ def main():
     out = os.path.expanduser(a.out)
     rnd = yaml.safe_load(open(a.cam))["randomize"]
     roads = sorted(glob.glob(os.path.join(os.path.expanduser(a.roads), "road_*")))
-    names = json.load(open(os.path.join(roads[0], "road.json")))["classes"]
+    names = json.load(open(os.path.join(roads[0], "road.json")))["classes"] + EGO
     for s in ("train", "val"):
         os.makedirs(os.path.join(out, "images", s), exist_ok=True)
         os.makedirs(os.path.join(out, "labels", s), exist_ok=True)
@@ -124,14 +143,15 @@ def main():
     for ri, road in enumerate(roads):
         split = "val" if ri in val_roads else "train"
         sc = Scene(road, a.cam)
-        made, tries = 0, 0
+        made, tries, ego = 0, 0, {}
         while made < a.per_road and tries < a.per_road * 3:
             tries += 1
             ctr = np.array(sc.info["size_mm"]) / 2000.0 if sc.info["type"] == "cross" else None
-            x, y, yaw = pick_pose(sc.info["paths"], rng, ctr)
-            img, inst = sc.render(x, y, yaw, dh=rng.uniform(-1, 1) * rnd["height_m"],
-                                  dtilt=rng.uniform(-1, 1) * rnd["tilt_deg"], droll=rng.uniform(-1, 1) * rnd["roll_deg"])
-            lines = to_yolo(inst, sc.info["instances"], names)
+            x, y, yaw, pi = pick_pose(sc.info["paths"], rng, ctr)
+            ego[pi] = ego[pi] if pi in ego else ego_floor(sc, pi)
+            img, inst, mine = sc.render(x, y, yaw, extra=ego[pi], dh=rng.uniform(-1, 1) * rnd["height_m"],
+                                        dtilt=rng.uniform(-1, 1) * rnd["tilt_deg"], droll=rng.uniform(-1, 1) * rnd["roll_deg"])
+            lines = to_yolo(inst, sc.info["instances"], names) + to_yolo(mine, EGO_ID, names)
             if not lines and rng.random() > EMPTY_KEEP:
                 continue
             img = augment(img, rng)
@@ -141,13 +161,15 @@ def main():
             for ln in lines:
                 counts[int(ln.split()[0])] += 1
             if checked < a.check:
-                cv2.imwrite(os.path.join(out, "check", name + ".jpg"), np.hstack([img, overlay(img, inst, sc.info["instances"])]))
+                both = img.copy()                            # 확인용: 가운데 = 기존 라벨, 오른쪽 = 내 차로 선(왼쪽 자홍, 오른쪽 초록, 중심 노랑)
+                both[mine == 1], both[mine == 2], both[mine == 3] = (255, 0, 255), (0, 255, 0), (0, 255, 255)
+                cv2.imwrite(os.path.join(out, "check", name + ".jpg"), np.hstack([img, overlay(img, inst, sc.info["instances"]), both]))
                 checked += 1
             made += 1
         sc.close()
         total += made
         print(f"[{ri + 1}/{len(roads)}] {os.path.basename(road)} ({split}): {made}장")
-    yaml.safe_dump({"path": ".", "train": "images/train", "val": "images/val",
+    yaml.safe_dump({"path": os.path.abspath(out), "train": "images/train", "val": "images/val",
                     "names": {i: n for i, n in enumerate(names)}}, open(os.path.join(out, "data.yaml"), "w"),
                    allow_unicode=True, sort_keys=False)
     print(f"끝. 총 {total}장 (검증 도로 {n_val}개), 라벨 조각 수: " + ", ".join(f"{n} {c}" for n, c in zip(names, counts)))

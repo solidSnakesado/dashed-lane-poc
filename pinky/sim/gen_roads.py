@@ -53,9 +53,8 @@ class Road:
     """테이프 다각형(클래스 포함)과 주행 경로를 모은다."""
 
     def __init__(self, rng):
-        self.rng, self.marks, self.paths = rng, [], []
-        self.lane_t = rng.uniform(*RG["line"])           # 차선 테이프 폭
-        self.stop_t = rng.uniform(17, 21)                # 정지선 (19mm)
+        self.rng, self.marks, self.paths, self.right = rng, [], [], []   # right = 경로마다 오른쪽 경계에 선이 있는지
+        self.lane_t, self.stop_t = rng.uniform(*RG["line"]), rng.uniform(17, 21)   # 차선 테이프 폭, 정지선 폭(19mm)
         self.dash, self.space = rng.uniform(*RG["dash"]), rng.uniform(*RG["gap"])   # 점선 길이, 간격
 
     def solid(self, line):
@@ -68,14 +67,16 @@ class Road:
     def carriageway(self, center, n, lw):
         """중심선 기준 왕복 도로: 가운데 실선, 같은 방향 차로 사이 점선, 양 끝 실선. 차로 중심 경로 저장."""
         self.solid(center)
+        edge = {}                                        # 쪽마다 바깥 경계선을 그렸는지
         for side in (1, -1):
             for k in range(1, n):
                 self.dashed(offset(center, side * k * lw))
-            if self.rng.random() > 0.15:                 # 가끔 바깥 경계선이 없는 도로
-                self.solid(offset(center, side * n * lw))
+            edge[side] = self.rng.random() > 0.15        # 가끔 바깥 경계선이 없는 도로
+            _ = edge[side] and self.solid(offset(center, side * n * lw))
             for k in range(n):                           # 오른쪽 통행: 진행 방향 오른쪽(-) 차로
                 lane = offset(center, -(k + 0.5) * lw)
                 self.paths.append((lane if side == 1 else offset(center, (k + 0.5) * lw)[::-1]).tolist())
+        self.right += [bool(edge[sd] or k < n - 1) for sd in (-1, 1) for k in range(n)]   # 경로 순서: (-)쪽 차로들, (+)쪽 차로들
 
 
 def winding(rng):
@@ -180,10 +181,9 @@ def main():
         floor, inst, to_px = render(road, size, a.ppm, rng)
         d = os.path.join(out, f"road_{a.seed:02d}_{i:04d}")
         os.makedirs(d, exist_ok=True)
-        cv2.imwrite(os.path.join(d, "floor.png"), floor)
-        cv2.imwrite(os.path.join(d, "inst.png"), inst)
+        cv2.imwrite(os.path.join(d, "floor.png"), floor), cv2.imwrite(os.path.join(d, "inst.png"), inst)
         info.update(size_mm=list(size), ppm=a.ppm, classes=CLASSES, line_w=road.lane_t, dash=road.dash, gap=road.space,
-                    instances={str(k): c for k, (c, _) in enumerate(road.marks, start=1)}, paths=road.paths)
+                    instances={str(k): c for k, (c, _) in enumerate(road.marks, start=1)}, paths=road.paths, path_right=road.right if len(road.right) == len(road.paths) else [True] * len(road.paths))
         json.dump(info, open(os.path.join(d, "road.json"), "w"))
         pv = floor.copy()
         for k, (cls, poly) in enumerate(road.marks, start=1):

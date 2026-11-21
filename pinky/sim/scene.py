@@ -68,8 +68,9 @@ class Scene:
         p = np.array([x + self.fwd * np.cos(yaw), y + self.fwd * np.sin(yaw), self.h + dh])
         return p, right, up, f
 
-    def render(self, x, y, yaw, **jitter):
-        """실제 카메라 화면(BGR)과 선 번호 그림(uint16, 0 = 바닥)을 돌려준다."""
+    def render(self, x, y, yaw, extra=None, **jitter):
+        """실제 카메라 화면(BGR)과 선 번호 그림(uint16, 0 = 바닥)을 돌려준다.
+        extra = 바닥 그림과 같은 크기의 다른 라벨 그림을 주면 그것도 같은 방식으로 옮겨 세 번째로 돌려준다."""
         p, right, up, f = self.pose(x, y, yaw, **jitter)
         quat = np.zeros(4)
         mujoco.mju_mat2Quat(quat, np.column_stack([right, up, -f]).ravel())   # MuJoCo 카메라는 -z를 바라봄
@@ -85,19 +86,21 @@ class Scene:
         floor_to_world = np.array([[1 / (1000 * self.ppm), 0, 0], [0, -1 / (1000 * self.ppm), Hpx / (1000 * self.ppm)], [0, 0, 1]])
         G = Ki @ np.column_stack([R[:, 0], R[:, 1], -R @ p])               # 바닥 (x, y, 1)[m] → 이상적 화면 (z = 0 평면)
         Hm = G @ floor_to_world
-        ideal_inst = cv2.warpPerspective(self.inst, Hm, (self.iw, self.ih), flags=cv2.INTER_NEAREST)
-        fl = np.array([f[0], f[1]]) / max(np.hypot(f[0], f[1]), 1e-9)                 # 바닥 위 앞 방향
-        side = np.array([fl[1], -fl[0]])
-        far = [p[:2] + MAX_DIST * fl + s * side for s in np.linspace(-4, 4, 9)]       # 먼 거리 경계선
-        q = np.array([G @ np.r_[pt, 1.0] for pt in far])
-        q = q[q[:, 2] > 0]
-        if len(q) >= 2:
-            q = (q[:, :2] / q[:, 2:]).astype(np.int32)
-            q = q[np.argsort(q[:, 0])]
-            cv2.fillPoly(ideal_inst, [np.vstack([q, [[q[-1, 0], -10 ** 4], [q[0, 0], -10 ** 4]]]).astype(np.int32)], 0)
-        inst = cv2.remap(ideal_inst, self.mapx, self.mapy, cv2.INTER_NEAREST)
-        inst[: max(0, int(self.horizon(R))), :] = 0
-        return img, inst
+        def label(floor):          # 바닥 위 라벨 그림을 실제 화면으로 옮김 (먼 거리와 지평선 위는 지움)
+            ideal = cv2.warpPerspective(floor, Hm, (self.iw, self.ih), flags=cv2.INTER_NEAREST)
+            fl = np.array([f[0], f[1]]) / max(np.hypot(f[0], f[1]), 1e-9)                 # 바닥 위 앞 방향
+            side = np.array([fl[1], -fl[0]])
+            far = [p[:2] + MAX_DIST * fl + s * side for s in np.linspace(-4, 4, 9)]       # 먼 거리 경계선
+            q = np.array([G @ np.r_[pt, 1.0] for pt in far])
+            q = q[q[:, 2] > 0]
+            if len(q) >= 2:
+                q = (q[:, :2] / q[:, 2:]).astype(np.int32)
+                q = q[np.argsort(q[:, 0])]
+                cv2.fillPoly(ideal, [np.vstack([q, [[q[-1, 0], -10 ** 4], [q[0, 0], -10 ** 4]]]).astype(np.int32)], 0)
+            out = cv2.remap(ideal, self.mapx, self.mapy, cv2.INTER_NEAREST)
+            out[: max(0, int(self.horizon(R))), :] = 0
+            return out
+        return (img, label(self.inst)) if extra is None else (img, label(self.inst), label(extra))
 
     def horizon(self, R):
         """실제 화면에서 지평선 행(대략). 그 위쪽 라벨은 지운다."""

@@ -7,6 +7,7 @@
 """
 import numpy as np
 
+from lane_curve import Curve
 from lane_geom import Piece
 
 MAX_GAP = 15.0      # 이어 붙일 최대 빈 구간(m). 점선 조각 하나가 가려진 경우까지 허용
@@ -18,8 +19,6 @@ SHORT_GAP = 3.0     # 둘 다 짧은 조각이면 이 거리(m) 안에서만 이
 SIDE_TOL = 1.0      # 방향을 못 믿는 조각은 연장선에서 옆으로 이 거리(m) 안에 있어야 이음
 SOLID_LEN = 8.0     # 이보다 긴 조각(m)이 있으면 실선으로 판정
 CHAIN_TRUST = 2.5   # 이어 붙인 길이가 이 이상(m)이면 짧은 조각들의 묶음이라도 방향을 믿음
-AHEAD = 20.0        # 선 끝에서 앞으로 더 이어 그리는 최대 거리(m)
-FAR_W = 30.0        # 이 거리(m)보다 먼 점은 곡선 맞춤에서 가중치를 낮춤 (멀수록 위치 오차가 큼)
 MAX_RMS = 0.5       # 맞춘 곡선과 점들의 차이가 이보다 크면(m) 잘못 묶인 선으로 보고 버림
 
 
@@ -125,62 +124,6 @@ def group_all(pieces):
             break
         chains = [[p for m in c for p in m.parts] for c in again]
     return chains
-
-
-class Curve:
-    """점열에 맞춘 매개변수 곡선 x(s), z(s). s = 선을 따라간 거리(m)."""
-
-    def __init__(self, pts):
-        self.pts = np.asarray(pts, float)
-        self.s = np.r_[0, np.cumsum(np.linalg.norm(np.diff(self.pts, axis=0), axis=1))]
-        # 짧은 선일수록 낮은 차수를 써서 엉뚱하게 휘는 것을 막음
-        deg = 1 if self.s[-1] < 6 else 2 if self.s[-1] < 20 else 3
-        deg = min(deg, len(self.pts) - 1)
-        w = 1.0 / (1.0 + (np.linalg.norm(self.pts, axis=1) / FAR_W) ** 2)
-        self.cx = np.polyfit(self.s, self.pts[:, 0], deg, w=w)
-        self.cz = np.polyfit(self.s, self.pts[:, 1], deg, w=w)
-        err = np.hypot(np.polyval(self.cx, self.s) - self.pts[:, 0], np.polyval(self.cz, self.s) - self.pts[:, 1])
-        self.rms = float(np.sqrt(np.average(err ** 2, weights=w)))   # 맞춤 오차(m)
-
-    @property
-    def length(self):
-        return float(self.s[-1])
-
-    def at(self, s):
-        """거리 s에서의 바닥 좌표 (N,2)."""
-        s = np.atleast_1d(np.asarray(s, float))
-        return np.c_[np.polyval(self.cx, s), np.polyval(self.cz, s)]
-
-    def sample(self, step=0.5):
-        """곡선을 일정 간격으로 찍은 점열."""
-        return self.at(np.linspace(0, self.length, max(int(self.length / step) + 1, 2)))
-
-
-    def heading(self, s):
-        """거리 s에서의 진행 방향 각(rad). 0 = 정면(+z), + = 오른쪽."""
-        return float(np.arctan2(np.polyval(np.polyder(self.cx), s), np.polyval(np.polyder(self.cz), s)))
-
-    def arc(self, dist, step=0.5, tip=None):
-        """선 끝에서 dist만큼 더 나아간 원호 점열. tip = 평활해 둔 (방향, 휘는 정도)를 주면 그 값을 쓴다."""
-        back = min(10.0, self.length)                # 끝에서 이 구간의 방향 변화로 휘는 정도를 구함
-        th = self.heading(self.length)
-        dth = (th - self.heading(self.length - back) + np.pi) % (2 * np.pi) - np.pi
-        kappa = float(np.clip(dth / back, -0.1, 0.1)) if self.length >= 12 else 0.0
-        if tip is not None:
-            th, kappa = float(tip[0]), float(tip[1])
-        if abs(kappa) > 1e-6:                        # 나아가는 동안 방향이 20도 넘게 돌지 않게 제한
-            dist = min(dist, np.radians(20) / abs(kappa))
-        ang = th + kappa * np.arange(step, dist + step, step)
-        return self.at(self.length)[0] + np.c_[np.cumsum(np.sin(ang)), np.cumsum(np.cos(ang))] * step
-
-    def ahead(self):
-        """화면에 앞으로 더 이어 그릴 점열. 본 길이보다 길게는 늘리지 않는다(짧게 본 선을 멀리 늘리면 틀리기 쉬움)."""
-        tip = getattr(self, "tip", None)             # 추적이 평활해 둔 (끝 방향, 휘는 정도, 그릴 거리 z)
-        if tip is not None:
-            dist = tip[2] - self.at(self.length)[0, 1]
-            return self.arc(dist, tip=tip) if dist >= 1 else np.zeros((0, 2))
-        dist = min(AHEAD, self.length)
-        return self.arc(dist) if dist >= 3 else np.zeros((0, 2))
 
 
 class Lane(Curve):

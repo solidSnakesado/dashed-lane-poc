@@ -11,19 +11,18 @@ from lane_group import Curve
 from lane_motion import along, blend_tip, common, extended, lateral, nearest, piece_ends, smooth
 from lane_roles import center_line, pick
 
-GATE = 1.2            # 같은 선으로 볼 최대 거리(m)
-Q_RATE = 1.0          # 1초 동안 선 위치가 변할 수 있는 정도(m²/s)
+GATE, Q_RATE = 1.2, 1.0   # 같은 선으로 볼 최대 거리(m) / 1초 동안 선 위치가 변할 수 있는 정도(m²/s)
 MOTION_SEC = 0.15     # 차량 움직임 추정을 고쳐 나가는 시간 상수(초)
 MOTION_MAX = np.array([np.radians(40.0), 3.0, 45.0])   # 1초에 가능한 최대 회전(rad)·옆 이동(m)·앞뒤 이동(m)
 R_MEAS = 0.10         # 한 번 측정의 오차(m²)
 KEEP_SEC = 1.0        # 안 보이는 점을 유지하는 시간(초). KEEP_Z보다 먼 점은 거리에 반비례해 짧게
 KEEP_DIST, HOLD_DIST = 8.0, 4.0   # 움직임 값을 받을 때: 안 보이는 점·내 차로 선을 이 거리(m)를 달릴 동안 유지 (점선 주기의 1배, 0.5배)
+NEAR_KEEP = 1e9       # 이번에 안 보인 점은 이 거리(m)보다 가까운 것만 기억함 (핑키: 위치를 믿을 수 있는 거리)
 KEEP_Z = 15.0         # 먼 점일수록 움직임 추정 오차가 크게 쌓이므로 빨리 버림
 HOLD_SEC, HOLD_LEN = 1.0, 30.0   # 내 차로 선은 통째로 안 보여도 이 시간(초) 동안, 앞으로 이 거리(m)까지 이어서 유지
 END_GATE, END_TURN = 0.6, 20.0   # 선 끝 너머에 있는 조각을 붙일 때의 거리(m)·방향 차(도) 한계
 MIN_NEW = 2.0         # 이보다 짧고 조각 하나뿐인 선은 새 추적 대상으로 삼지 않음(m)
-ROLE_SEC = 0.15       # 내 차로 선으로 인정하려면 이 시간(초) 이상 보였어야 함
-ROLE_BIAS = 0.5       # 대응 찾을 때 내 차로 선에 주는 우선권(m)
+ROLE_SEC, ROLE_BIAS = 0.15, 0.5   # 내 차로 선으로 인정하려면 이 시간(초) 이상 보였어야 함 / 대응 찾을 때 내 차로 선에 주는 우선권(m)
 MATCH_TURN = 30.0     # 추적 중인 선과 방향이 이 각(도) 넘게 다른 조각은 붙이지 않음
 Z_BACK, DEFAULT_WIDTH = -3.0, 3.3   # 차량 뒤로 이만큼(m) 넘어간 점은 버림 / 한쪽 선만 보일 때 쓰는 차로 폭 초기값(m)
 
@@ -76,6 +75,7 @@ class Track:
         coast = hold > 0 and not lanes
         far = 1.0 if coast else np.maximum(np.linalg.norm(self.pts, axis=1) / KEEP_Z, 1.0)
         ok = ((self.age * far <= (hold if coast else keep)) | bridge) & (self.pts[:, 1] > Z_BACK)
+        ok &= (self.age == 0) | (self.pts[:, 1] <= NEAR_KEEP) | bridge   # 멀리서만 본 점은 부정확하므로 기억하지 않음
         if ok.sum() < 2:
             return False
         self.pts, self.age = self.pts[ok], self.age[ok]
