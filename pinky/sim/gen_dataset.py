@@ -1,7 +1,8 @@
 """핑키 차선 학습 데이터 생성기 (YOLO-seg). 생성한 도로마다 핑키 카메라 화면과 라벨을 무작위로 만든다.
 
-  MUJOCO_GL=egl python gen_dataset.py ROADS_DIR CAMERA_YAML OUT_DIR [--per-road 100] [--per-cross N] [--val 0.15] [--seed 0] [--check 20]
-  (--per-cross = 교차로 도로에서만 도로당 장수를 따로 줌. 안 주면 --per-road와 같음)
+  MUJOCO_GL=egl python gen_dataset.py ROADS_DIR CAMERA_YAML OUT_DIR [--per-road 100] [--per-cross N] [--per-cross2 N] [--val 0.15] [--seed 0] [--check 20]
+  (--per-cross = 교차로 도로에서만 도로당 장수를 따로 줌. 안 주면 --per-road와 같음.
+   --per-cross2 = 편도 2차로 교차로에서만 따로 줌. 안 주면 --per-cross와 같음)
 결과:
   OUT_DIR/images/{train,val}/*.jpg, OUT_DIR/labels/{train,val}/*.txt, OUT_DIR/data.yaml (상대 경로)
   OUT_DIR/check/  라벨을 겹친 확인용 그림 (--check 장수)
@@ -113,6 +114,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--per-road", type=int, default=100)
     ap.add_argument("--per-cross", type=int, default=0, help="교차로 도로의 도로당 장수 (0이면 --per-road와 같음)")
+    ap.add_argument("--per-cross2", type=int, default=0, help="편도 2차로 교차로의 도로당 장수 (0이면 --per-cross와 같음)")
     ap.add_argument("--val", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--check", type=int, default=20)
@@ -134,6 +136,7 @@ def main():
         sc = Scene(road, a.cam)
         made, tries, rt = 0, 0, Routes(sc, LATERAL_MM, YAW_DEG)
         want = a.per_cross if a.per_cross and sc.info["type"] == "cross" else a.per_road
+        want = a.per_cross2 if a.per_cross2 and sc.info["type"] == "cross" and sc.info["lanes_per_dir"] == 2 else want
         while made < want and tries < want * 3:
             tries += 1
             x, y, yaw = pick_pose(rt, rng)
