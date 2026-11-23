@@ -26,6 +26,7 @@ LATERAL_MM, YAW_DEG = 60, 15     # 차로 중심에서 벗어나는 범위
 NEAR, NEAR_LW = 0.8, 4.0         # 교차로 도로에서 교차로 근처를 찍는 비율, 입구 앞으로 포함하는 거리(차로 폭의 배수)
 NEAR_TRACK = 0.5                 # 트랙 도로에서의 그 비율. 교차로 밖에도 급한 모서리가 있어 낮춘다
 TURN_IN = 0.5                    # 회전 경로에서 교차로 근처를 찍을 때 원호 위(교차로 안)에서 고르는 비율
+LC, LC_LW, LC_YAW = 0.25, 1.0, 30.0   # 교차로 밖 자세 중 차선 변경 중으로 찍는 비율, 옆으로 차로 폭의 ±배, 방향 ±도(옮겨 가는 쪽으로 기울임)
 EMPTY_KEEP = 0.1                 # 라벨이 하나도 없는 화면은 이 비율만 남김
 MIN_AREA = 25                    # 이보다 작은 조각(픽셀)은 라벨에서 뺌
 # 확인용 그림의 색(MINE 순서): 내 차로 왼쪽·오른쪽·중심, 좌회전 면·왼쪽·오른쪽, 우회전(가까운 쪽·가운데·먼 쪽)마다 면·왼쪽·오른쪽
@@ -38,7 +39,8 @@ def pick_pose(rt, rng):
 
     교차로 도로는 NEAR 비율만큼을 교차로 근처(입구에서 차로 폭의 NEAR_LW배 앞 ~ 나오는 곳)에서 고른다. 직진 경로의 교차로 안도 포함한다.
     회전(좌회전·우회전) 경로는 교차로를 나오기 전까지만 고른다(나온 뒤의 차로는 그 차로를 지나는 다른 경로에서 고른다).
-    회전 원호 위에서는 더 크게 흔든다(TURN_LW, TURN_YAW). 벗어난 자세에서 회전 면이 치우쳐 보이는 것을 배우게 하려는 것이다."""
+    회전 원호 위에서는 더 크게 흔든다(TURN_LW, TURN_YAW). 벗어난 자세에서 회전 면이 치우쳐 보이는 것을 배우게 하려는 것이다.
+    교차로 밖의 LC 비율은 차선 변경 중의 자세다: 옆으로 차로 폭만큼까지 옮기고 옮겨 가는 쪽으로 기울인다. 옮긴 곳이 어느 차로에도 들지 않으면(반대 방향 차로, 도로 밖) 보통 자세로 찍는다."""
     r = rt.r[int(rng.integers(len(rt.r)))]
     n, cross, turn = len(r["p"]), r["kind"] != "lane", r["kind"] in TURNS
     lo, hi = 2, max(3, r["ex"] if turn else int(n * 0.85))
@@ -48,7 +50,14 @@ def pick_pose(rt, rng):
     i = int(rng.integers(lo, max(lo + 1, hi)))
     yaw, arc = r["ang"][i], turn and r["en"] <= i <= r["ex"]
     lat, turn = (max(LATERAL_MM, TURN_LW * rt.info["lane_w"]), max(YAW_DEG, TURN_YAW)) if arc else (LATERAL_MM, YAW_DEG)
-    x, y = r["p"][i] + rng.uniform(-lat, lat) * np.array([-np.sin(yaw), np.cos(yaw)])
+    nrm = np.array([-np.sin(yaw), np.cos(yaw)])                        # 진행 방향 왼쪽
+    if not arc and rng.random() < LC:                                  # 차선 변경 중
+        s = rng.uniform(-LC_LW, LC_LW) * rt.info["lane_w"]
+        a = yaw + np.radians(np.clip(np.sign(s) * rng.uniform(0, LC_YAW) + rng.uniform(-5, 5), -LC_YAW, LC_YAW))
+        x, y = r["p"][i] + s * nrm
+        if any(z != 1 for _, z in rt.key(x, y, a)):
+            return x / 1000.0, y / 1000.0, a
+    x, y = r["p"][i] + rng.uniform(-lat, lat) * nrm
     return x / 1000.0, y / 1000.0, yaw + np.radians(rng.uniform(-turn, turn))
 
 

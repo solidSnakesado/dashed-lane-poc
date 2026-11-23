@@ -1,4 +1,5 @@
-"""모델이 직접 내놓은 '내 차로 왼쪽 선·오른쪽 선·중심선'(ego_left, ego_right, ego_center)과 좌회전 면(lturn_lane)을 바닥 위의 선과 중심선으로 바꾼다.
+"""모델이 직접 내놓은 '내 차로 왼쪽 선·오른쪽 선·중심선'(ego_left, ego_right, ego_center)과 회전 면·회전 좌우 선을 바닥 위의 선과 중심선으로 바꾼다.
+회전(좌회전 lturn_*, 우회전 rturn1_*·rturn2_*·rturn3_*)의 중심선은 lane_turn.py가 만든다: 좌우 선이 보이면 그 가운데, 없으면 면의 바깥쪽 경계 기준.
 
 lane_live.py와 쓰는 법이 같지만 훨씬 단순하다: 조각 묶기·추적·좌우 고르기가 없다.
 중심선만 기억한다: 앞서 본 중심선을 로봇이 움직인 만큼 옮겨 두고 새로 본 것과 합친다(move를 줄 때만).
@@ -10,20 +11,18 @@ import numpy as np
 
 from lane_geom import Camera
 from lane_trace import trace
+from lane_turn import EDGE, MAX_PTS, MIN_PX, REACH, SPAN, between, edge, shift
 
-REACH = 12.0     # 카메라 높이의 이 배수까지만 선을 내보냄 (58 mm → 약 0.7 m). 그보다 먼 바닥은 위치 오차가 큼
-SPAN = 2.0       # 선을 다듬을 때 주변으로 보는 거리 = 카메라 높이의 이 배수
 LOOK = 1.25      # 조향 목표로 쓸 앞 거리 = 차로 폭의 이 배수 (차로 폭을 아직 모르면 카메라 높이의 5배)
-EDGE = 2         # 화면 끝에서 이 픽셀 안에 닿은 경계는 잘린 것으로 봄
-MIN_PX = 30      # 마스크 픽셀이 이보다 적으면 선으로 쓰지 않음
-MAX_PTS = 600    # 선 하나에 쓰는 마스크 픽셀 수의 상한 (계산량 제한)
 MEM = 2.0        # 중심선 기억이 흐려지는 거리 = 카메라 높이의 이 배수만큼 달릴 때마다 가중치가 1/e로 줄어듦
 MEM_MIN = 0.05   # 가중치가 이보다 작아진 기억은 버림
+SWITCH = 0.5     # 새로 본 중심선이 기억과 차로 폭의 이 배수보다 떨어져 있으면 차로가 바뀐 것(차선 변경)으로 보고 기억을 버림
 
 
 class Direct:
-    def __init__(self, calib_path, fps=None):
-        """calib_path = 카메라 보정 파일(npz, 실제 m 단위)."""
+    def __init__(self, calib_path, fps=None, turn="line"):
+        """calib_path = 카메라 보정 파일(npz, 실제 m 단위). turn = 회전 중심선을 무엇으로 만들지("line" 좌우 선 먼저, "area" 면만)."""
+        self.turn, self.switch = turn, SWITCH
         self.cam = Camera(calib_path)
         self.cam_h = float(np.load(calib_path)["cam_h"])
         self.widths = []                                   # 양쪽 선이 함께 보일 때 잰 차로 폭들
@@ -42,6 +41,11 @@ class Direct:
 
     def merge(self, seen):
         """새로 본 중심선(없으면 None)을 기억과 합쳐 다듬은 중심선을 돌려준다. 쓸 점이 없으면 None."""
+        if seen is not None and self.switch and not self.side and self.widths and len(self.mem) >= 4:   # 회전 중에는 하지 않음
+            near = seen[np.linalg.norm(seen, axis=1) <= 4 * self.cam_h]                               # 로봇 가까운 부분으로 비교
+            gap = np.linalg.norm(near[:, None] - self.mem[None, :, :2], axis=2).min(axis=1) if len(near) else []
+            if len(gap) and np.median(gap) > self.switch * float(np.median(self.widths)):
+                self.mem = self.mem[:0]
         if seen is not None:
             self.mem = np.r_[self.mem, np.c_[seen, np.ones(len(seen))]]
         if len(self.mem) < 4:
@@ -74,47 +78,6 @@ class Direct:
         pick = np.linspace(0, len(u) - 1, min(len(u), MAX_PTS)).astype(int)
         return self.chains(self.ground(np.c_[u[pick], v[pick]]), side)
 
-    def edge(self, polys, size, lane_w):
-        """좌회전 면 → 차로 중심선 (N,2). 면을 따라 한 걸음씩 가면서, 가는 방향에 가로로 자른 단면의 바깥쪽(오른쪽) 끝에서 차로 폭의 절반만큼 안쪽을 잡는다.
-        면의 가운데를 쓰지 않는 이유: 왼쪽으로 휘어 나가는 면은 화면 왼쪽 끝에서 잘려, 보이는 부분의 가운데가 오른쪽으로 치우친다.
-        오른쪽 끝이 화면 밖으로 잘린 단면에서는 왼쪽 끝에서 절반만큼 바깥을 잡고, 양쪽이 다 잘렸으면 가던 방향을 유지한다."""
-        w, h = size
-        mask = np.zeros((h, w), np.uint8)
-        cv2.fillPoly(mask, [np.round(p).astype(np.int32) for p in polys], 1)
-        v, u = np.nonzero(mask)
-        if len(u) < MIN_PX:
-            return None
-        pick = np.linspace(0, len(u) - 1, min(len(u), 5 * MAX_PTS)).astype(int)
-        g, ok = self.cam.to_ground(np.c_[u[pick], v[pick]].astype(float))
-        ok &= (g[:, 1] > 0) & (np.linalg.norm(g, axis=1) <= REACH * self.cam_h)
-        g, cut_l, cut_r = g[ok], mask[v[pick], : EDGE + 1].any(axis=1)[ok], mask[v[pick], -EDGE - 1:].any(axis=1)[ok]
-        if len(g) < MIN_PX:
-            return None
-        step, d, path = SPAN * self.cam_h / 2, np.array([0.0, 1.0]), []
-        c = np.array([np.median(g[g[:, 1] <= g[:, 1].min() + step, 0]), g[:, 1].min() - step / 2])
-        if self.prev is not None and len(self.prev) >= 2:                  # 출발점과 출발 방향: 직전 중심선이 면에 처음 닿는 곳
-            hit = np.nonzero(np.linalg.norm(self.prev[:, None] - g[None, ::7], axis=2).min(axis=1) <= step / 2)[0]
-            if len(hit):
-                k = min(int(hit[0]), len(self.prev) - 2)
-                d = (self.prev[k + 1] - self.prev[k]) / (np.linalg.norm(self.prev[k + 1] - self.prev[k]) + 1e-9)
-                c = self.prev[k] - step / 2 * d
-        for _ in range(int(2 * REACH * self.cam_h / step)):
-            c2, n = c + step * d, np.array([d[1], -d[0]])
-            rel = g - c2
-            sel = (np.abs(rel @ d) <= step / 2) & (np.abs(rel @ n) <= 1.5 * lane_w)
-            if sel.sum() < 5:
-                break
-            s = rel[sel] @ n
-            i, j = int(np.argmax(s)), int(np.argmin(s))
-            if not cut_r[sel][i]:
-                c2 = c2 + (np.percentile(s, 95) - lane_w / 2) * n
-            elif not cut_l[sel][j]:
-                c2 = c2 + (np.percentile(s, 5) + lane_w / 2) * n
-            d = (c2 - c) / (np.linalg.norm(c2 - c) + 1e-9)
-            path.append(c2)
-            c = c2
-        return np.array(path) if len(path) >= 2 else None
-
     def join(self, egos, turn):
         """내 차로 중심선들 egos와 좌회전 선 turn을 가는 순서대로 잇는다: 좌회전 선이 시작되기 전의 ego + turn + turn이 끝나는 방향으로 이어지는 ego."""
         ego = egos[0] if egos else None
@@ -133,21 +96,31 @@ class Direct:
                     tail, best = part, (part[-1] - part[0]) @ t
         return np.vstack([head, turn, tail])
 
-    def step(self, polys, size, move=None, route="lane"):
+    def step(self, polys, size, move=None, route="lane", slot=1):
         """polys = [(클래스 이름, 픽셀 폴리곤)], size = (화면 폭, 높이).
-        route = 가는 방향. "left"(좌회전)이면 좌회전 면(lturn_lane)이 보이는 곳부터는 그 면에서 만든 선을 따라간다. 그 밖에는 내 차로 선(ego_*)만 쓴다.
+        route = 가는 방향. "left"·"right"(회전)이면 회전 면이나 회전 좌우 선이 보이는 곳부터는 거기서 만든 선을 따라간다. 그 밖에는 내 차로 선(ego_*)만 쓴다.
+        slot = 우회전으로 들어갈 차로(1 가까운 쪽, 2 가운데, 3 먼 쪽). 경로에서 정한다(다음 교차로에서 우회전이면 1, 직진이면 2, 좌회전이면 3).
         move = 직전 프레임 이후 카메라가 움직인 양 (왼쪽으로 돈 각 rad, 오른쪽 이동 m, 앞 이동 m). 없으면 기억을 쓰지 않는다.
         돌려주는 값은 lane_live.Live.step과 같은 형식. center는 로봇에서 가까운 곳부터 가는 순서."""
-        self.side = -1.0 if route == "left" else 0.0
+        self.side = {"left": -1.0, "right": 1.0}.get(route, 0.0)
         of = lambda k: [p for c, p in polys if c == k]
         get = lambda k: self.lines(of(k), size, self.side) if of(k) else []
         first = lambda ch: ch[0] if ch else None
         left, right, mids = first(get("ego_left")), first(get("ego_right")), get("ego_center")
         mid = first(mids)
-        if route == "left":                                # 좌회전 면 앞쪽(아직 갈라지기 전)과 뒤쪽(돌아 나갈 차로)은 내 차로 중심선, 가운데는 좌회전 면에서 만든 선
-            lw0 = float(np.median(self.widths)) if self.widths else None
-            turn = None if not of("lturn_lane") else self.edge(of("lturn_lane"), size, lw0) if lw0 else first(get("lturn_lane"))
-            mid = self.join(mids, turn)                    # 차로 폭을 알면 면의 바깥쪽 경계 기준, 모르면 면의 가운데
+        if self.side:                                      # 회전 앞쪽(아직 갈라지기 전)과 뒤쪽(돌아 나갈 차로)은 내 차로 중심선, 가운데는 회전 선·면에서 만든 선
+            pre, lw0 = "lturn" if route == "left" else f"rturn{slot}", float(np.median(self.widths)) if self.widths else None
+            turn = None
+            if self.turn == "line" and lw0:                # 바깥쪽 선을 따라간다: 들어오는 차로의 그쪽 선 + 회전 바깥쪽 선 + 나가는 차로의 그쪽 선
+                o = "right" if route == "left" else "left"   # 바깥쪽(좌회전은 오른쪽). 회전 후반에는 중심선보다 바깥쪽 선이 화면에 더 오래 남는다
+                outer = self.join(get("ego_" + o), first(get(pre + "_" + o))) if of(pre + "_" + o) else None
+                turn = None if outer is None or len(outer) < 2 else shift(outer, self.side * lw0 / 2)
+            if turn is None and self.turn == "line":
+                turn = between(first(get(pre + "_left")), first(get(pre + "_right")), lw0)
+            if turn is None and of(pre + "_lane"):         # 선이 없으면 면: 차로 폭을 알면 바깥쪽 경계 기준, 모르면 면의 가운데
+                area = of(pre + "_lane")
+                turn = edge(self.cam, self.cam_h, self.prev, area, size, lw0, -self.side) if lw0 else first(get(pre + "_lane"))
+            mid = turn if turn is not None and self.turn == "line" and lw0 and of(pre + "_" + o) else self.join(mids, turn)
         center, guess = mid, mid is None                   # 모델이 중심선을 직접 내놓으면 그것을 씀
         if left is not None and right is not None:         # 같은 앞 거리에서 두 선의 가운데 (차로 폭도 여기서 잼)
             ls, rs = left[np.argsort(left[:, 1])], right[np.argsort(right[:, 1])]

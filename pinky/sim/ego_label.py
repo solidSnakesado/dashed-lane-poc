@@ -1,8 +1,9 @@
 """내 차로 선 정답 만들기. 데이터 생성(gen_dataset.py)과 시뮬 주행의 정답 모드(sim_closed.py)가 함께 쓴다.
 
 정답은 로봇의 위치와 방향만으로 정해진다(어느 경로로 달리는 중인지는 쓰지 않는다. 사진에는 그 정보가 없기 때문).
-  1) 로봇이 지금 올라타 있다고 볼 수 있는 경로를 모두 찾는다(경로에서 옆으로 lat 이내, 방향 차 yaw 이내).
-     회전 경로의 교차로 안 원호에서는 이 한계를 넓힌다(옆으로 차로 폭의 TURN_LW배, 방향 TURN_YAW도). 돌 때는 제어만으로도 그만큼 벗어나기 때문이다.
+  1) 로봇이 지금 올라타 있다고 볼 수 있는 경로를 모두 찾는다.
+     교차로 밖: 로봇 중심이 그 차로의 왼쪽 선과 오른쪽 선 사이에 있으면(방향 차 YAW_LANE도 이내) 그 차로다. 차선을 넘는 순간 옆 차로로 바뀐다(차선 변경).
+     교차로 안: 경로에서 옆으로 lat 이내, 방향 차 yaw 이내. 회전 원호에서는 이 한계를 넓힌다(옆으로 차로 폭의 TURN_LW배, 방향 TURN_YAW도).
   2) ego_*   = 그 경로들 가운데 직진·일반 도로 경로를 따라가는 선(왼쪽·오른쪽·중심). 교차로를 가로질러 건너편 차로까지 이어진다.
                회전 경로는 교차로 앞 차로 구간만 ego_*이고, 직진 경로가 하나도 없을 때(돌고 있는 중)는 돌아 나갈 차로가 ego_*이다.
   3) 회전 경로의 교차로 안 원호는 두 가지로 그린다. 이미 돌아 나온 뒤에는 그리지 않는다.
@@ -33,6 +34,7 @@ MIN_AREA = 25        # 이보다 작은 조각(픽셀)은 라벨에서 뺌
 STEP = 4.0           # 경로를 다시 찍는 간격(mm)
 CACHE_BYTES = 1.0e9  # 그려 둔 정답 바닥 그림을 기억해 두는 한도(바이트)
 TURN_LW, TURN_YAW = 0.4, 30.0   # 회전 원호 위로 보는 한계: 옆으로 차로 폭의 이 배수, 방향 차(도). 사진을 찍을 때도 이 범위로 흔듦
+YAW_LANE = 35.0      # 교차로 밖에서 차로 안으로 보는 방향 차 한계(도). 차선 변경 중에는 차로와 비스듬하므로 넓게 둔다
 
 
 def route(info, pi):
@@ -63,6 +65,7 @@ class Routes:
         """lat = 경로에서 옆으로 벗어나도 그 경로 위로 보는 한계(mm), yaw = 방향 차 한계(도). 사진을 찍을 때 흔드는 범위와 같게 준다."""
         self.sc, self.info, self.lat, self.yaw, self.r, self.cache = sc, sc.info, lat + 1.0, np.radians(yaw) + 1e-3, [], {}
         self.lat_t, self.yaw_t = max(self.lat, TURN_LW * sc.info["lane_w"] + 1.0), max(self.yaw, np.radians(TURN_YAW) + 1e-3)
+        self.yaw_l = max(self.yaw, np.radians(YAW_LANE) + 1e-3)
         right, half = self.info.get("path_right", [True] * len(self.info["paths"])), self.info["lane_w"] / 2
         for j, raw in enumerate(self.info["paths"]):
             p = np.asarray(raw, float)
@@ -87,9 +90,16 @@ class Routes:
             d = np.hypot(r["p"][:, 0] - x, r["p"][:, 1] - y)
             i = int(np.argmin(d))
             turn = abs((r["ang"][i] - yaw + np.pi) % (2 * np.pi) - np.pi)
-            arc = r["kind"] in TURNS and r["en"] <= i <= r["ex"]                  # 회전 원호 위: 넓힌 한계
-            if j == own or (d[i] <= (self.lat_t if arc else self.lat) and turn <= (self.yaw_t if arc else self.yaw)):
-                out.append((j, int(i >= r["en"]) + int(i > r["ex"])))
+            zone = int(i >= r["en"]) + int(i > r["ex"])
+            if zone != 1:                                                         # 교차로 밖: 로봇 중심이 이 차로의 양쪽 선 사이에 있는지
+                c, sn = np.cos(r["ang"][i]), np.sin(r["ang"][i])
+                off, lon = c * (y - r["p"][i, 1]) - sn * (x - r["p"][i, 0]), c * (x - r["p"][i, 0]) + sn * (y - r["p"][i, 1])   # 왼쪽 +, 앞 +
+                on = -r["wr"][i] <= off < r["wl"][i] and abs(lon) <= self.lat and turn <= self.yaw_l     # 경로의 끝 너머는 lat까지만
+            else:                                                                 # 교차로 안: 회전 원호 위는 넓힌 한계
+                arc = r["kind"] in TURNS
+                on = d[i] <= (self.lat_t if arc else self.lat) and turn <= (self.yaw_t if arc else self.yaw)
+            if j == own or on:
+                out.append((j, zone))
         return tuple(out)
 
     def floor(self, key):
