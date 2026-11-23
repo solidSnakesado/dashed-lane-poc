@@ -1,12 +1,13 @@
 """핑키 차선 학습 데이터 생성기 (YOLO-seg). 생성한 도로마다 핑키 카메라 화면과 라벨을 무작위로 만든다.
 
-  MUJOCO_GL=egl python gen_dataset.py ROADS_DIR CAMERA_YAML OUT_DIR [--per-road 100] [--per-cross N] [--per-cross2 N] [--val 0.15] [--seed 0] [--check 20]
+  MUJOCO_GL=egl python gen_dataset.py ROADS_DIR CAMERA_YAML OUT_DIR [--per-road 100] [--per-cross N] [--per-cross2 N] [--per-track N] [--val 0.15] [--seed 0] [--check 20]
   (--per-cross = 교차로 도로에서만 도로당 장수를 따로 줌. 안 주면 --per-road와 같음.
-   --per-cross2 = 편도 2차로 교차로에서만 따로 줌. 안 주면 --per-cross와 같음)
+   --per-cross2 = 편도 2차로 교차로에서만 따로 줌. 안 주면 --per-cross와 같음.
+   --per-track = 트랙 도로(gen_track_save.py로 만든 것)에서만 따로 줌. 안 주면 --per-road와 같음)
 결과:
   OUT_DIR/images/{train,val}/*.jpg, OUT_DIR/labels/{train,val}/*.txt, OUT_DIR/data.yaml (상대 경로)
   OUT_DIR/check/  라벨을 겹친 확인용 그림 (--check 장수)
-무작위로 바꾸는 것: 차로 안 좌우 위치 ±60mm, 방향 ±15도(좌회전 원호 위에서는 차로 폭의 ±0.4배, ±30도), 카메라 기울기·좌우·높이(pinky_camera.yaml의 randomize),
+무작위로 바꾸는 것: 차로 안 좌우 위치 ±60mm, 방향 ±15도(회전 원호 위에서는 차로 폭의 ±0.4배, ±30도), 카메라 기울기·좌우·높이(pinky_camera.yaml의 randomize),
   밝기·대비, 색조(실물의 초록빛 틀어짐 포함), 그림자, 흐림, 노이즈, JPEG 압축, 지평선 위·보드 밖 배경.
 """
 import argparse
@@ -18,30 +19,34 @@ import cv2
 import numpy as np
 import yaml
 
-from ego_label import MINE, STEP, TURN_LW, TURN_YAW, Routes, mine_yolo
+from ego_label import MINE, STEP, TURN_LW, TURN_YAW, TURNS, Routes, mine_yolo
 from scene import Scene, overlay
 
 LATERAL_MM, YAW_DEG = 60, 15     # 차로 중심에서 벗어나는 범위
 NEAR, NEAR_LW = 0.8, 4.0         # 교차로 도로에서 교차로 근처를 찍는 비율, 입구 앞으로 포함하는 거리(차로 폭의 배수)
-TURN_IN = 0.5                    # 좌회전 경로에서 교차로 근처를 찍을 때 원호 위(교차로 안)에서 고르는 비율
+NEAR_TRACK = 0.5                 # 트랙 도로에서의 그 비율. 교차로 밖에도 급한 모서리가 있어 낮춘다
+TURN_IN = 0.5                    # 회전 경로에서 교차로 근처를 찍을 때 원호 위(교차로 안)에서 고르는 비율
 EMPTY_KEEP = 0.1                 # 라벨이 하나도 없는 화면은 이 비율만 남김
 MIN_AREA = 25                    # 이보다 작은 조각(픽셀)은 라벨에서 뺌
+# 확인용 그림의 색(MINE 순서): 내 차로 왼쪽·오른쪽·중심, 좌회전 면·왼쪽·오른쪽, 우회전(가까운 쪽·가운데·먼 쪽)마다 면·왼쪽·오른쪽
+CHECK_COL = [(255, 0, 255), (255, 150, 200), (0, 255, 0), (0, 0, 170), (0, 140, 255), (0, 255, 255), (170, 90, 0), (255, 255, 0), (255, 255, 255),
+             (0, 110, 60), (120, 255, 120), (200, 255, 200), (110, 0, 110), (255, 120, 255), (255, 200, 255)]
 
 
 def pick_pose(rt, rng):
     """경로 하나의 한 지점을 고르고 좌우 위치·방향을 흔든다. (x, y [m], yaw [rad])
 
     교차로 도로는 NEAR 비율만큼을 교차로 근처(입구에서 차로 폭의 NEAR_LW배 앞 ~ 나오는 곳)에서 고른다. 직진 경로의 교차로 안도 포함한다.
-    좌회전 경로는 교차로를 나오기 전까지만 고른다(나온 뒤의 차로는 그 차로를 지나는 다른 경로에서 고른다).
-    좌회전 원호 위에서는 더 크게 흔든다(TURN_LW, TURN_YAW). 벗어난 자세에서 좌회전 면이 치우쳐 보이는 것을 배우게 하려는 것이다."""
+    회전(좌회전·우회전) 경로는 교차로를 나오기 전까지만 고른다(나온 뒤의 차로는 그 차로를 지나는 다른 경로에서 고른다).
+    회전 원호 위에서는 더 크게 흔든다(TURN_LW, TURN_YAW). 벗어난 자세에서 회전 면이 치우쳐 보이는 것을 배우게 하려는 것이다."""
     r = rt.r[int(rng.integers(len(rt.r)))]
-    n, cross = len(r["p"]), r["kind"] != "lane"
-    lo, hi = 2, max(3, int(n * 0.85) if r["kind"] != "left" else r["ex"])
-    if cross and rng.random() < NEAR:
+    n, cross, turn = len(r["p"]), r["kind"] != "lane", r["kind"] in TURNS
+    lo, hi = 2, max(3, r["ex"] if turn else int(n * 0.85))
+    if cross and rng.random() < (NEAR_TRACK if rt.info["type"] == "track" else NEAR):
         lo, hi = max(lo, r["en"] - int(NEAR_LW * rt.info["lane_w"] / STEP)), min(hi, r["ex"]) + 1
-        lo = r["en"] if r["kind"] == "left" and rng.random() < TURN_IN else lo
+        lo = r["en"] if turn and rng.random() < TURN_IN else lo
     i = int(rng.integers(lo, max(lo + 1, hi)))
-    yaw, arc = r["ang"][i], r["kind"] == "left" and r["en"] <= i <= r["ex"]
+    yaw, arc = r["ang"][i], turn and r["en"] <= i <= r["ex"]
     lat, turn = (max(LATERAL_MM, TURN_LW * rt.info["lane_w"]), max(YAW_DEG, TURN_YAW)) if arc else (LATERAL_MM, YAW_DEG)
     x, y = r["p"][i] + rng.uniform(-lat, lat) * np.array([-np.sin(yaw), np.cos(yaw)])
     return x / 1000.0, y / 1000.0, yaw + np.radians(rng.uniform(-turn, turn))
@@ -115,6 +120,7 @@ def main():
     ap.add_argument("--per-road", type=int, default=100)
     ap.add_argument("--per-cross", type=int, default=0, help="교차로 도로의 도로당 장수 (0이면 --per-road와 같음)")
     ap.add_argument("--per-cross2", type=int, default=0, help="편도 2차로 교차로의 도로당 장수 (0이면 --per-cross와 같음)")
+    ap.add_argument("--per-track", type=int, default=0, help="트랙 도로의 도로당 장수 (0이면 --per-road와 같음)")
     ap.add_argument("--val", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--check", type=int, default=20)
@@ -137,6 +143,7 @@ def main():
         made, tries, rt = 0, 0, Routes(sc, LATERAL_MM, YAW_DEG)
         want = a.per_cross if a.per_cross and sc.info["type"] == "cross" else a.per_road
         want = a.per_cross2 if a.per_cross2 and sc.info["type"] == "cross" and sc.info["lanes_per_dir"] == 2 else want
+        want = a.per_track if a.per_track and sc.info["type"] == "track" else want
         while made < want and tries < want * 3:
             tries += 1
             x, y, yaw = pick_pose(rt, rng)
@@ -152,9 +159,9 @@ def main():
             for ln in lines:
                 counts[int(ln.split()[0])] += 1
             if checked < a.check:
-                both = img.copy()        # 확인용: 가운데 = 기존 라벨, 오른쪽 = 내 차로 선(자홍·초록·노랑) + 좌회전 선(주황·하늘·빨강)
-                for k, col in enumerate(((255, 0, 255), (0, 255, 0), (0, 255, 255), (0, 140, 255), (255, 200, 0), (0, 0, 255))):
-                    both[(mine >> k) & 1 > 0] = col
+                both = img.copy()        # 확인용: 가운데 = 기존 라벨, 오른쪽 = 내 차로 선과 회전 면·선(CHECK_COL의 색). 면을 먼저, 선을 위에
+                for k in sorted(range(len(MINE)), key=lambda k: not MINE[k].endswith("_lane")):
+                    both[(mine >> k) & 1 > 0] = CHECK_COL[k]
                 cv2.imwrite(os.path.join(out, "check", name + ".jpg"), np.hstack([img, overlay(img, inst, sc.info["instances"]), both]))
                 checked += 1
             made += 1
