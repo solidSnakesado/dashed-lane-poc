@@ -19,7 +19,8 @@ import numpy as np
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, ROOT)
-from gen_dataset import EGO, EGO_ID, background, ego_floor, to_yolo  # noqa: E402
+from ego_label import MINE, Routes, mine_yolo, route  # noqa: E402
+from gen_dataset import LATERAL_MM, YAW_DEG, background, to_yolo  # noqa: E402
 from lane_direct import Direct  # noqa: E402
 from lane_geom import Camera  # noqa: E402
 from lane_control import pursuit  # noqa: E402
@@ -35,9 +36,9 @@ STOP_SEC = 2.0       # 출발한 뒤 이 시간(초) 동안 멈춰 있으면 끝
 
 def detect(model, img, inst, mine, sc, a):
     """검출 결과 [(클래스 이름, 픽셀 폴리곤)]. 모델이 없으면 시뮬 정답 라벨을 쓴다(내 차로 선 라벨 포함)."""
-    names = sc.info["classes"] + EGO
+    names = sc.info["classes"] + MINE
     if model is None:
-        rows = [ln.split() for ln in to_yolo(inst, sc.info["instances"], names) + to_yolo(mine, EGO_ID, names)]
+        rows = [ln.split() for ln in to_yolo(inst, sc.info["instances"], names) + mine_yolo(mine, names)]
         return [(names[int(r[0])], np.array(r[1:], float).reshape(-1, 2) * (sc.W, sc.H)) for r in rows]
     r = model.predict(img, imgsz=a.imgsz, conf=a.conf, retina_masks=True, verbose=False)[0]
     if r.masks is None:
@@ -51,7 +52,7 @@ def main():
     ap.add_argument("--cam", default=os.path.join(ROOT, "pinky", "config", "pinky_camera.yaml"))
     ap.add_argument("--weights", default="", help="검출 모델. 비우면 시뮬 정답 라벨 사용")
     ap.add_argument("--imgsz", type=int, default=640), ap.add_argument("--conf", type=float, default=0.25)
-    ap.add_argument("--path", type=int, default=0, help="달릴 차로 번호")
+    ap.add_argument("--path", type=int, default=0, help="달릴 경로 번호 (교차로 도로는 경로마다 직진·좌회전이 정해져 있음)")
     ap.add_argument("--speed", type=float, default=0.2, help="전진 속도(m/s)")
     ap.add_argument("--w-max", type=float, default=1.5, help="최대 회전 속도(rad/s)")
     ap.add_argument("--fps", type=float, default=15.0)
@@ -76,16 +77,17 @@ def main():
     x, y, yaw = path[0, 0], path[0, 1], float(np.arctan2(tan[0, 1], tan[0, 0]))
     tint = np.array([rng.uniform(0.95, 1.1), rng.uniform(1.0, 1.15), rng.uniform(0.8, 0.95)])
     bg, live, dt = background(sc.H, sc.W, rng), (Direct if a.direct else Live)(calib, a.fps), 1.0 / a.fps
-    mine_floor, cam_real = ego_floor(sc, a.path), Camera(calib)        # 정답 내 차로 선(모델 없이 돌릴 때), 그리기용 카메라
+    kind = route(sc.info, a.path)[0]                                  # 가는 방향(일반 도로·직진·좌회전). 실제 핑키에서는 지도의 경로에서 받는 값
+    rt, cam_real = Routes(sc, LATERAL_MM, YAW_DEG), Camera(calib)      # 정답 선(모델 없이 돌릴 때), 그리기용 카메라
     vw = cv2.VideoWriter(os.path.join(out, "closed.avi"), cv2.VideoWriter_fourcc(*"MJPG"), a.fps, (sc.W, sc.H))   # 기본 재생기로 열리는 형식
     cmd, lost, still, move, started, rows, end = (0.0, 0.0), 0.0, 0, None, None, [], "시간 초과"
     for i in range(int((s_path[-1] / a.speed + 30) * a.fps)):
-        img, inst, mine = sc.render(x, y, yaw, extra=mine_floor)
+        img, inst, mine = sc.render(x, y, yaw, extra=rt.floor(rt.key(x * 1000, y * 1000, yaw, a.path)))
         img = look(img, tint, 3.0, bg)
         dets = detect(model, img, inst, mine, sc, a)
-        res = live.step(dets, (sc.W, sc.H), move)
+        res = live.step(dets, (sc.W, sc.H), move, kind) if a.direct else live.step(dets, (sc.W, sc.H), move)
         if a.direct:                                          # 모델이 내놓은 내 차로 선 마스크의 테두리(가는 노란 선)
-            cv2.polylines(img, [np.round(p).astype(np.int32) for c, p in dets if c in EGO], True, (0, 220, 255), 1)
+            cv2.polylines(img, [np.round(p).astype(np.int32) for c, p in dets if c in MINE], True, (0, 220, 255), 1)
         new = None if res is None else pursuit(res["center"], res["look"], a.speed, a.w_max, CAM_FWD)
         if new is not None:
             cmd, lost, started = new, 0.0, (i if started is None else started)
@@ -129,6 +131,7 @@ def main():
     cv2.polylines(top, [px(np.array([[float(r[1]), float(r[2])] for r in rows]))], False, (0, 0, 255), max(2, int(3 * ppm)))
     cv2.imwrite(os.path.join(out, "closed_top.jpg"), cv2.resize(top, None, fx=800 / max(top.shape[:2]), fy=800 / max(top.shape[:2])))
     off = np.abs([float(r[6]) for r in rows[started or 0:]]) / lw
+    print(f"경로 {a.path}: {dict(lane='일반 도로', straight='교차로 직진', left='교차로 좌회전')[kind]}")
     print(f"결과: {end}  (주행 {float(rows[-1][7]):.2f} / {s_path[-1] - END_MARGIN:.2f} m, {len(rows)}프레임, 출발 전 측정 {started}프레임)")
     print(f"차로 중심에서 벗어난 거리(차로 폭 {lw * 1000:.0f} mm 대비): 중앙 {np.median(off):.1%}, 최대 {off.max():.1%}"
           f"  | 중심선 없는 프레임 {sum(r[9] == 0 for r in rows[started or 0:])}")
