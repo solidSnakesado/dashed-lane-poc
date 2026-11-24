@@ -20,8 +20,10 @@ def load(path):
 
 
 def rotation(tilt_deg, roll_deg):
-    """세계(x 오른쪽, y 아래, z 앞) → 카메라 회전. 아래로 숙임 후 광축 둘레로 좌우 기울어짐."""
-    t, r = np.radians(tilt_deg), np.radians(roll_deg)
+    """세계(x 오른쪽, y 아래, z 앞) → 카메라 회전. 아래로 숙임 후 광축 둘레로 좌우 기울어짐.
+    roll +: 화면 오른쪽이 위로 들림(카메라의 오른쪽 축이 위를 향함). calib_pose_live.py가 재는 값, scene.py가 그리는 값과 같은 정의.
+    (예전에는 부호가 반대여서, 바닥으로 옮긴 위치가 가까운 곳에서 약 8 mm 옆으로 치우쳤다)"""
+    t, r = np.radians(tilt_deg), -np.radians(roll_deg)
     pitch = np.array([[1, 0, 0], [0, np.cos(t), -np.sin(t)], [0, np.sin(t), np.cos(t)]])
     roll = np.array([[np.cos(r), np.sin(r), 0], [-np.sin(r), np.cos(r), 0], [0, 0, 1]])
     return roll @ pitch

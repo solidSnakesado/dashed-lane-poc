@@ -78,8 +78,10 @@ class Routes:
             b = self.info["routes"][j] if "routes" in self.info else {}
             (l0, r0), (l1, r1) = b.get("bounds_in", (half, half)), b.get("bounds_out", (half, half))
             f = np.clip((np.arange(len(q)) - ien) / max(iex - ien, 1), 0.0, 1.0)       # 교차로 안에서 0 → 1
-            self.r.append(dict(p=q, ang=np.arctan2(t[:, 1], t[:, 0]), kind=kind, en=ien, ex=iex, right=right[j],
-                               wl=l0 + (l1 - l0) * f, wr=r0 + (r1 - r0) * f,
+            wl, wr = l0 + (l1 - l0) * f, r0 + (r1 - r0) * f
+            if "wl" in b:                                  # 점마다 선까지 거리가 적혀 있으면 그것을 씀(모서리에서 차로 폭이 바뀌는 도로)
+                wl, wr = np.interp(ss, s, b["wl"]), np.interp(ss, s, b["wr"])
+            self.r.append(dict(p=q, ang=np.arctan2(t[:, 1], t[:, 0]), kind=kind, en=ien, ex=iex, right=right[j], wl=wl, wr=wr,
                                cls="lturn" if kind == "left" else f"rturn{b.get('slot', 1)}"))    # 회전 클래스 이름의 앞부분
 
     def key(self, x, y, yaw, own=None):
