@@ -4,7 +4,7 @@
 도로마다 폴더 하나(gen_roads.py와 같은 형식에 routes를 더함):
   floor.png, inst.png(선마다 번호), road.json(클래스, 경로, routes = 경로마다 종류·교차로 구간·들어갈 차로 번호·좌우 선까지의 거리), preview.jpg
 번호를 붙이는 것: 흰 선(차로 사이 점선, 가장자리선, 외곽 바깥 선, 들머리 점선, 흰 중앙선), 정지선, 횡단보도.
-번호를 붙이지 않는 것: 노면 화살표, 노란 중앙선, 블록. 사진에는 나오지만 라벨이 없어 모델은 차선이 아닌 것으로 배운다.
+번호를 붙이지 않는 것: 노면 화살표(안쪽 도로의 차로마다, 외곽 도로의 들머리 앞. 모양은 gen_track_save.py), 노란 중앙선, 블록. 사진에는 나오지만 라벨이 없어 모델은 차선이 아닌 것으로 배운다.
 """
 import argparse
 import json
@@ -33,6 +33,7 @@ def build(rng):
     outer, e = rng.choice(["dash", "solid"], p=[0.6, 0.4]), U(8, 20)    # 외곽 바깥 선, 가장자리선을 도로 끝에서 띄우는 거리
     yellow_mid, mouth = rng.random() < 0.7, rng.random() < 0.7
     marks, plain = [], []                                  # marks: (클래스, 다각형) 번호를 붙임 / plain: (다각형, 색) 번호 없음
+    ar = np.random.default_rng(int(W * 1000 + H))          # 화살표 모양·외곽 화살표용 난수(따로 둬서 도로의 나머지 모양은 이전 버전과 똑같이 나온다)
     def line(pts, style, cls="white_lane"):
         pts = np.asarray(pts, float)
         for p in (pieces(pts, dash, gap, U(0, dash + gap)) if style == "dash" else [pts]):
@@ -104,4 +105,10 @@ def build(rng):
                 for m_ in sorted(mv if mv is not None else {"R"}):
                     tip = p0 + f * 0.45 * lw + {"S": 0, "L": 1, "R": -1}[m_] * lf * 0.3 * lw
                     plain.append((np.array([p0 - f * 0.45 * lw, p0 + f * 0.1 * lw, tip]), "arrow"))
-    return L, marks, plain, bmask, dict(t=t, dash=dash, gap=gap, eb=eb, ob=lw / 2 - e, edge=str(edge), outer=str(outer))
+        sa = A["s_in"][0] - lw / 2 - ar.uniform(1.3, 2.5) * lw   # 외곽 도로의 화살표(번호 없음): 들머리 앞, 직진 + 우회전(들어가는 쪽)
+        if ar.random() < 0.6 and all(min((sa - sc) % L.P, (sc - sa) % L.P) > r + 0.7 * lw for sc, _, r in L.rc):   # 모서리 굽은 곳은 뺌
+            p0, f = np.array(L.pt(sa), float), np.array(L.pt(sa + 1.0), float) - np.array(L.pt(sa), float)
+            for m_ in "RS":
+                tip = p0 + f * 0.45 * lw + {"S": 0, "R": -1}[m_] * np.array([-f[1], f[0]]) * 0.3 * lw
+                plain.append((np.array([p0 - f * 0.45 * lw, p0 + f * 0.1 * lw, tip]), "arrow_r"))
+    return L, marks, plain, bmask, dict(t=t, dash=dash, gap=gap, eb=eb, ob=lw / 2 - e, edge=str(edge), outer=str(outer), ar=ar)

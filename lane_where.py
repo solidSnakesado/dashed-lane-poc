@@ -53,14 +53,16 @@ class Where:
                     right=float(g.wr[k] + off) / 1000.0, lane_w=float(g.wl[k] + g.wr[k]) / 1000.0)
 
     def map_lines(self, k, pose):
-        """점 k의 차로를 앞으로 따라간 지도 선(교차로 밖 부분만)을 추정 위치의 카메라 기준 점열로. 없으면 None."""
+        """점 k의 차로를 앞으로 따라간 지도 선(칠해진 선이 이어지는 데까지)을 추정 위치의 카메라 기준 점열로. 없으면 None."""
         g = self.g
         ids = g.ahead(k, self.route if self.route is not None else np.array([k]), AHEAD * self.cam_h * 1000.0)
-        ids = ids[g.zone[ids] == 0]
-        if len(ids) < 2:
-            return None
-        _, _, left, right, _ = g.lane(ids)
-        return dict(left=lane_check.to_cam(left / 1000.0, pose, self.cam_fwd), right=lane_check.to_cam(right / 1000.0, pose, self.cam_fwd))
+        _, _, left, right, z = g.lane(ids)
+        out = {}
+        for side, line in enumerate((left, right)):                     # 쪽마다: 교차로 밖은 그대로, 교차로 구간은 그 선이 칠해진 데까지만
+            have = (z == 0) if g.paint is None else (z == 0) | g.paint[ids, side]
+            m = len(ids) if have.all() else int(np.argmin(have))        # 처음 끊기는 곳까지(그 뒤를 붙이면 빈 곳을 가로지르는 가짜 선분이 생긴다)
+            out["left" if side == 0 else "right"] = lane_check.to_cam(line[:m] / 1000.0, pose, self.cam_fwd) if m >= 2 else None
+        return None if out["left"] is None and out["right"] is None else out
 
     def lane_ahead(self, k, pose):
         """그리기용: 점 k에서 길을 따라 앞으로 간 내 차로의 왼쪽·오른쪽 선(카메라 기준 점열)과 점마다 교차로 안 여부.
@@ -75,7 +77,7 @@ class Where:
     def confirm(self, where, seen, pose):
         """where = locate의 결과, seen = {"left": 점열, "right": 점열}(비전, 카메라 기준 m) 또는 None. 돌려주는 값: dict(status, lat, yaw, n)."""
         none = dict(status="none", lat=None, yaw=None, n=0)
-        if where["state"] != "lane" or seen is None:
+        if where["state"] not in ("lane", "cross") or seen is None:     # 교차로 구간도 칠해진 선이 있으면 확인한다(없으면 지도 선이 없어 '확인 못 함')
             return none
         expect = self.map_lines(where["k"], pose)
         c = None if expect is None else lane_check.check(seen, expect, self.cam_h, self.cam_fwd, where["lane_w"])

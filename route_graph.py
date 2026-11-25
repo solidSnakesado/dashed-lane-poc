@@ -25,6 +25,7 @@ LC_LEN = 2.5         # 차선 변경에 쓰는 길이 = 차로 폭의 이 배수
 LC_PEN = 2.0         # 차선 변경 벌칙 = 차로 폭의 이 배수
 LC_EVERY = 5         # 차선 변경 선은 점 이 개수마다 하나
 DASH = (0.15, 0.85)  # 칠한 비율이 이 사이면 점선
+GAP = 1.5            # 점선의 빈칸으로 보고 메우는 길이 = 그림에서 잰 빈칸 길이의 이 배수까지
 
 
 class Graph:
@@ -55,13 +56,39 @@ class Graph:
                     rows.append(a); cols.append(b); w.append(d)
                 if fw <= 0:
                     rows.append(b); cols.append(a); w.append(d)
-        self.lc = set()
+        self.lc, self.paint = set(), None
         if road:
+            self.paint = self.painted(road)                                        # 점마다 왼쪽·오른쪽 선 자리에 흰 선이 칠해져 있는지
             for a, b, d in self.lane_changes(road, step):
                 rows.append(a); cols.append(b); w.append(d); self.lc.add((a, b))
         n = len(self.P)
         self.G = coo_matrix((w, (rows, cols)), shape=(n, n)).tocsr()
         self.nxt = np.r_[np.where(self.pid[1:, 0] == self.pid[:-1, 0], np.arange(1, n), -1), -1]   # 같은 경로의 다음 점(없으면 -1)
+
+    def painted(self, road):
+        """점마다 (왼쪽 선, 오른쪽 선) 자리에 흰 선이 칠해져 있는지 (N,2). 바닥 그림에서 읽고, 점선의 빈칸은 칠한 것으로 메운다.
+        빈칸 길이는 그림에서 잰다: 교차로 밖에서 양쪽이 칠로 막힌 빈 구간 길이의 중앙값. 그 GAP배까지만 메우므로 교차로의 빈 곳은 남는다."""
+        info = json.load(open(road + "/road.json")); ppm = info["ppm"]
+        inst = cv2.imread(road + "/inst.png", cv2.IMREAD_UNCHANGED); H, W = inst.shape[:2]
+        white = np.isin(inst, [int(k) for k, v in info["instances"].items() if v == "white_lane"]).astype(np.uint8)
+        white = cv2.dilate(white, np.ones((3, 3), np.uint8)).astype(bool)             # 1픽셀 흔들려도 칠한 것으로
+        n = np.c_[-np.sin(self.yaw), np.cos(self.yaw)]; out, runs = [], []
+        for pts in (self.P + n * self.wl[:, None], self.P - n * self.wr[:, None]):
+            u, v = np.round(pts[:, 0] * ppm).astype(int), np.round(H - pts[:, 1] * ppm).astype(int)
+            ok = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+            raw = np.zeros(len(pts), bool); raw[ok] = white[v[ok], u[ok]]
+            edge = np.r_[True, (raw[1:] != raw[:-1]) | (self.pid[1:, 0] != self.pid[:-1, 0]), True]   # 구간 경계(경로가 바뀌는 곳도 경계)
+            st = np.where(edge)[0]
+            for a, b in zip(st[:-1], st[1:]):                                       # 빈 구간 [a, b) 가운데 같은 경로 안에서 양쪽이 칠로 막힌 것
+                if not raw[a] and a > 0 and b < len(raw) and raw[a - 1] and raw[b] and self.pid[a - 1, 0] == self.pid[b, 0]:
+                    runs.append((len(out), a, b, bool(self.zone[a:b].any())))
+            out.append(raw)
+        free = [b - a for _, a, b, z in runs if not z]
+        lim = GAP * float(np.median(free)) if free else 0.0
+        for side, a, b, _ in runs:
+            if b - a <= lim:
+                out[side][a:b] = True
+        return np.c_[out[0], out[1]]
 
     def lane_changes(self, road, step):
         """(옮기기 전 점, 옮긴 뒤 점, 값) 목록. 바닥 그림에서 두 차로 사이 선이 점선인지 본다."""
