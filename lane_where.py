@@ -62,6 +62,16 @@ class Where:
         _, _, left, right, _ = g.lane(ids)
         return dict(left=lane_check.to_cam(left / 1000.0, pose, self.cam_fwd), right=lane_check.to_cam(right / 1000.0, pose, self.cam_fwd))
 
+    def lane_ahead(self, k, pose):
+        """그리기용: 점 k에서 길을 따라 앞으로 간 내 차로의 왼쪽·오른쪽 선(카메라 기준 점열)과 점마다 교차로 안 여부.
+        교차로 안도 뺀 곳 없이 준다(칠해진 선은 없지만 지도를 믿고 그리는 부분). 비전 확인에는 쓰지 않는다."""
+        g = self.g
+        ids = g.ahead(k, self.route if self.route is not None else np.array([k]), AHEAD * self.cam_h * 1000.0)
+        if len(ids) < 2:
+            return None
+        _, _, left, right, zone = g.lane(ids)
+        return dict(left=lane_check.to_cam(left / 1000.0, pose, self.cam_fwd), right=lane_check.to_cam(right / 1000.0, pose, self.cam_fwd), zone=zone)
+
     def confirm(self, where, seen, pose):
         """where = locate의 결과, seen = {"left": 점열, "right": 점열}(비전, 카메라 기준 m) 또는 None. 돌려주는 값: dict(status, lat, yaw, n)."""
         none = dict(status="none", lat=None, yaw=None, n=0)

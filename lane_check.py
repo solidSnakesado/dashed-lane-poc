@@ -13,6 +13,7 @@ import numpy as np
 NEAR = (1.5, 8.0)    # 비교에 쓰는 앞 거리 = 카메라 높이의 이 배수 사이 (58 mm → 약 9 ~ 46 cm). 멀수록 위치 오차가 큼
 MIN_N = 6            # 이보다 적은 지점으로는 추정하지 않음
 WARN = 0.15          # 옆으로 차로 폭의 이 배수보다 틀리면 경고
+TRIM = 0.05          # 맞춘 뒤에도 지도 선에서 차로 폭의 이 배수보다 떨어진 점은 하나씩 버리고 다시 맞춤
 
 
 def to_cam(P, pose, cam_fwd):
@@ -37,9 +38,11 @@ def check(seen, expect, cam_h, cam_fwd, lane_w, iters=4):
         return None
     both = sum(len(q) >= MIN_N // 2 for q, _ in pairs) == 2   # 선이 하나뿐이면 방향은 정하지 않고 옆만 낸다(하나로는 옆·방향이 서로 바꿔치기됨)
     th, t = 0.0, np.zeros(2)
-    for it in range(iters):
-        A, y = [], []
-        for q, m in pairs:
+    dead = [np.zeros(len(q), bool) for q, _ in pairs]             # 버린 점(위치가 틀렸을 때는 점들이 다 같이 어긋나고, 비전이 선을 잘못 그렸을 때는 일부만 어긋난다)
+    prev, used = None, 0
+    for it in range(2 * iters + sum(len(q) for q, _ in pairs)):
+        A, y, KEEP, worst = [], [], [], (0.0, None)
+        for pi, (q, m) in enumerate(pairs):
             c, s_ = np.cos(th), np.sin(th)
             piv = np.array([0.0, -cam_fwd])                       # 바퀴 축(카메라 기준)
             mm = (m - piv) @ np.array([[c, s_], [-s_, c]]) + piv + t   # 지금까지 맞춘 만큼 돌리고 옮긴 지도 선
@@ -51,14 +54,27 @@ def check(seen, expect, cam_h, cam_fwd, lane_w, iters=4):
             keep = np.abs(res) <= (0.5 if it == 0 else 0.25) * lane_w   # 짝이 틀린 점은 버림
             keep &= (k > 0) & (k < len(mm) - 1)                    # 지도 선 범위 밖(끝점과 짝)은 버림: 점들이 끝점 하나에 몰리면 돌림과 옆 옮김을 구분하지 못함
             perp = np.c_[-(mm[k, 1] - piv[1]), mm[k, 0] - piv[0]]   # 바퀴 축 둘레로 반시계로 돌릴 때 움직이는 방향
-            A.append(np.c_[np.sum(n * perp, axis=1), n][keep]), y.append(res[keep])
+            keep &= ~dead[pi]
+            if it >= iters and keep.any() and np.abs(res[keep]).max() > worst[0]:   # 다 맞춘 뒤: 가장 크게 남은 점을 찾음
+                worst = (float(np.abs(res[keep]).max()), (pi, int(np.where(keep)[0][np.abs(res[keep]).argmax()])))
+            A.append(np.c_[np.sum(n * perp, axis=1), n][keep]), y.append(res[keep]), KEEP.append(keep)
+        if it >= iters:
+            sig = b"".join(k_.tobytes() for k_ in KEEP)
+            if worst[0] <= TRIM * lane_w and sig == prev:
+                break                                              # 남은 점이 모두 지도 선과 맞고, 바로 그 점들로 맞춘 결과임
+            prev = sig
+            if worst[0] > TRIM * lane_w:
+                dead[worst[1][0]][worst[1][1]] = True
+                cut = lambda L: [v[np.where(k_)[0] != worst[1][1]] if pi == worst[1][0] else v for pi, (v, k_) in enumerate(zip(L, KEEP))]
+                A, y = cut(A), cut(y)
         A, y = np.vstack(A), np.concatenate(y)
         if len(y) < MIN_N:
             return None
+        used = len(y)
         reg = np.sqrt(len(y)) * np.array([[0, 0, 0, 0.0], [0, 0, 0, 0], [0, 0, 1.0, 0]])[:, :3] * 0.3   # 앞뒤 옮김은 작게 누름
         M = np.r_[A, reg[2:3]] if both else np.r_[A, reg[2:3]][:, 1:]
         d = np.linalg.lstsq(M, np.r_[y, 0.0], rcond=None)[0]
         d = d if both else np.r_[0.0, d]
         th, t = th + d[0], t + d[1:]
     e = -float(t[0])
-    return dict(lat=e, yaw=float(th) if both else None, n=int(len(y)), warn=bool(abs(e) > WARN * lane_w))
+    return dict(lat=e, yaw=float(th) if both else None, n=int(used), warn=bool(abs(e) > WARN * lane_w))

@@ -1,0 +1,12 @@
+# 출발지 → 목적지 주행(goal_runner.py)용 덮어쓰기. 핑키 설정을 바꾸자는 것이 아님.
+#  - 주시 거리: 속도 비례를 끄고 고정 0.1 m (물리 시험에서 차로 안에 머문 값, rpp_look01.yaml과 같음)
+#  - 도착 판정 거리 0.02 m: 정지선 앞 멈출 곳에 가깝게 서도록(0.05 m면 그만큼 앞에서 멈춤)
+controller_server:
+  ros__parameters:
+    general_goal_checker:
+      xy_goal_tolerance: 0.02
+      yaw_goal_tolerance: 0.5
+    FollowPath:
+      use_velocity_scaled_lookahead_dist: false
+      lookahead_dist: 0.1
+      min_lookahead_dist: 0.05

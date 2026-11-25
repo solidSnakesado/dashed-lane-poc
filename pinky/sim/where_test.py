@@ -5,7 +5,7 @@
   1) 위치: 모듈이 낸 상태(차로 안/밖/교차로)와 벗어난 거리를 '추정 위치 기준 정답'과 비교한다. 정답 = 주행한 경로의 가운데·선까지 거리로 직접 계산.
      넣은 오차가 0일 때는 실제 위치 기준 정답과도 비교한다(실제로 차로를 벗어난 프레임을 '밖'으로 내는지).
   2) 비전 확인: 확인됨 / 불일치 / 확인 못 함의 수와, 비전이 낸 옆 오차가 넣은 오차와 맞는지.
-사용: python where_test.py ROAD 주행기록폴더 감시기록폴더 [넣을 옆 오차 mm ...]   환경 변수 EVERY(vision_watch와 같은 값, 기본 2)
+사용: python where_test.py ROAD 주행기록폴더 감시기록폴더 [넣을 옆 오차 mm ...]   환경 변수 EVERY(vision_watch와 같은 값, 기본 2), YAW(넣을 방향 오차 도, 반시계 +)
 """
 import os, pickle, subprocess, sys
 import numpy as np
@@ -28,20 +28,22 @@ def truth(r, xy_mm):
 
 def main():
     road, runs, watch = sys.argv[1:4]; errs = [float(v) for v in sys.argv[4:]] or [0.0]
-    every = int(os.environ.get("EVERY", 2))
+    every, yaw_e = int(os.environ.get("EVERY", 2)), np.radians(float(os.environ.get("YAW", 0)))
     cam_yaml, calib = ROOT + "/pinky/config/pinky_camera.yaml", "/tmp/where_calib.npz"
     subprocess.run([sys.executable, ROOT + "/pinky/config/pinky_camera.py", cam_yaml, calib], check=True, capture_output=True)
     sc = S.Scene(road, cam_yaml); rt = Routes(sc, S.LATERAL_MM, S.YAW_DEG); sc.close()
     g = Graph(rt, STEP, road); w = Where(g, float(np.load(calib)["cam_h"]), S.CAM_FWD)
     names = ("lane", "out", "cross", "other")
     for e in errs:
-        conf = np.zeros((4, 4), int); conf_true = np.zeros((4, 4), int); doff, stat, lat, missed = [], dict(ok=0, mismatch=0, none=0), [], []
+        conf = np.zeros((4, 4), int); conf_true = np.zeros((4, 4), int); doff, stat, lat, missed, yaws = [], dict(ok=0, mismatch=0, none=0), [], [], []
         for j, r in enumerate(rt.r):
+            if not os.path.exists(f"{watch}/{j:02d}_seen.pkl"):                  # 기록이 있는 경로만
+                continue
             R = np.load(f"{runs}/{j:02d}.npy")[::every]; seen = pickle.load(open(f"{watch}/{j:02d}_seen.pkl", "rb"))
             w.set_route(np.where(g.pid[:, 0] == j)[0])
             for row, s in zip(R, seen):
                 x, y, yaw = row[4:7]; hl = np.array([-np.sin(yaw), np.cos(yaw)])
-                pose = (x + hl[0] * e / 1000, y + hl[1] * e / 1000, yaw)          # 모듈에 넣는 추정 위치
+                pose = (x + hl[0] * e / 1000, y + hl[1] * e / 1000, yaw + yaw_e)   # 모듈에 넣는 추정 위치
                 out = w.step(pose, None if s["left"] is None and s["right"] is None else dict(left=s["left"], right=s["right"]))
                 st, off = truth(r, np.array(pose[:2]) * 1000)
                 conf[names.index(st), names.index(out["state"])] += 1
@@ -56,8 +58,10 @@ def main():
                     stat[out["status"]] += 1
                     if out["lat"] is not None:
                         lat.append(out["lat"] * 1000)
+                    if out["yaw"] is not None:
+                        yaws.append(np.degrees(out["yaw"]))
         d, lat = np.abs(doff), np.array(lat); n = sum(stat.values())
-        print(f"넣은 옆 오차 {e:+.0f} mm")
+        print(f"넣은 옆 오차 {e:+.0f} mm" + (f", 방향 오차 {np.degrees(yaw_e):+.1f}도 → 비전이 낸 방향 오차 중앙 {np.median(yaws):+.2f}도 (방향을 낸 프레임 {len(yaws)})" if yaw_e and yaws else ""))
         print(f"  위치(추정 위치 기준 정답 → 모듈): " + ", ".join(f"{a}→{b} {conf[i, k]}" for i, a in enumerate(names) for k, b in enumerate(names) if conf[i, k]))
         print(f"  벗어난 거리 차이 mm: 중앙 {np.median(d):.2f}, 95% {np.percentile(d, 95):.2f}, 최대 {d.max():.2f} ({len(d)}프레임)")
         if e == 0:
