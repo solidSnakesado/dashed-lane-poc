@@ -8,7 +8,7 @@
 차선 변경 엣지는 두 점을 곧게 잇는 선이다(옆으로 차로 폭만큼). 부드럽게 옮겨 가는 궤적(draw_lane.poses의 S자)은 경로를 받은 쪽에서 만들어야 한다.
 정지선: 바닥에 칠해진 정지선(inst.png의 stop_line)을 경로가 가로질러 넘는 곳마다, 그 선의 가까운 쪽 가장자리에서 STOP_GAP만큼 앞의 노드에
        metadata stop_line = true, stop_gap = 그 노드에서 선까지 거리(m)를 넣는다. 로봇(바퀴 축)이 이 노드에 서면 앞머리가 선을 넘지 않는다.
-함께 쓰는 파일(route_nodes.json): 경로마다 출발·도착 노드 번호, 노드 좌표·방향·교차로 여부·차로 가운데에서 양쪽 선까지 거리, 정지 노드 목록(stops: [노드 번호, 선까지 거리]).
+함께 쓰는 파일(map.jpg: 화면에 띄울 지도 그림, route_nodes.json): 지도 그림의 좌표 환산, 경로마다 출발·도착 노드 번호, 노드 좌표·방향·교차로 여부·차로 가운데에서 양쪽 선까지 거리, 정지 노드 목록(stops: [노드 번호, 선까지 거리]).
 사용: python route_export.py ROAD_DIR OUT_DIR
 """
 import json, os, sys
@@ -20,6 +20,7 @@ from route_graph import Graph, SAME, SAME_YAW, JUMP
 
 STOP_GAP = 0.09        # 정지 노드에서 정지선까지(m) = 바퀴 축에서 로봇 앞머리까지 0.072(pinky_mujoco 물리 모델에서 잰 값) + 여유
 STOP_CROSS = 60.0      # 경로가 정지선을 이 각도(도)보다 크게 가로지를 때만 그 선을 지키는 것으로 본다(스치듯 지나는 남의 선은 뺌)
+MAP_PX = 1100          # 화면에 띄울 지도 그림의 긴 쪽 크기(픽셀)
 SAME_EVERY = 5        # 같은 차로 건너가기 엣지는 점 이 개수마다(엣지 번호도 uint16 범위에 맞추려고)
 
 
@@ -48,6 +49,14 @@ def stop_nodes(road, info, g):
             b = max(a - int(round(STOP_GAP * 1000 / STEP)), 0)
             out[int(pts[b])] = round(float(np.linalg.norm(np.diff(p[b:a + 1], axis=0), axis=1).sum()) / 1000.0, 4)
     return out
+
+
+def map_image(road, info, out):
+    """지도를 화면에 띄울 그림(map.jpg, 긴 쪽 MAP_PX 픽셀)으로 줄여 저장. 돌려주는 값: 파일 이름과 좌표 환산(픽셀 = x·px_per_m, 높이 − y·px_per_m)."""
+    import cv2
+    img = cv2.imread(road + "/floor.png"); k = min(1.0, MAP_PX / max(img.shape[:2]))
+    small = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA); cv2.imwrite(out + "/map.jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return dict(file="map.jpg", px_per_m=round(info["ppm"] * 1000 * k, 4), height=int(small.shape[0]))
 
 
 def main():
@@ -90,7 +99,8 @@ def main():
     json.dump({"type": "FeatureCollection", "name": "graph", "features": feats}, open(out + "/lane_graph.geojson", "w"))
     starts = {j: int(np.where(g.pid[:, 0] == j)[0][0]) for j in range(len(sc.info["routes"]))}
     ends = {j: int(np.where(g.pid[:, 0] == j)[0][-1]) for j in range(len(sc.info["routes"]))}
-    json.dump({"routes": [dict(name=r["name"], kind=r["kind"], start=starts[j], goal=ends[j],
+    view = map_image(road, sc.info, out)
+    json.dump({"map": view, "routes": [dict(name=r["name"], kind=r["kind"], start=starts[j], goal=ends[j],
                                half=min(r["bounds_in"] + r["bounds_out"]) / 1000.0) for j, r in enumerate(sc.info["routes"])],
                "xy": np.round(P, 4).tolist(), "yaw": np.round(g.yaw, 5).tolist(), "zone": g.zone.tolist(),
                "wl": np.round(g.wl / 1000.0, 4).tolist(), "wr": np.round(g.wr / 1000.0, 4).tolist(), "stops": sorted([int(k), v] for k, v in stops.items())},

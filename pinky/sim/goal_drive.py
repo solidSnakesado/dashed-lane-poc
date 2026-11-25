@@ -6,10 +6,8 @@ Route Server 대신 같은 그래프 파일(lane_graph.geojson)에서 최소 비
 사용: python goal_drive.py GRAPH_DIR OUT 출발 목적지 [출발 목적지 ...]     출발·목적지 = 노드 번호 또는 x,y 또는 x,y,방향(도)
 환경 변수: PINKY_PRO, LOOKFIX(고정 주시 거리 m, 기본 0.1), WAIT(정지 시간 초, 기본 1.0)
 """
-import json, math, os, sys
+import math, os, sys
 import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import dijkstra
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [HERE, os.path.dirname(HERE) + "/ros"]
 from phys_drive import PINKY_PRO, CTRL_HZ, place, Physics, RPP, build_model
@@ -17,21 +15,6 @@ import goal_plan as G
 
 STOP_TOL = 0.02        # 멈출 곳까지 남은 경로가 이보다 짧으면 그 구간 끝(m). 젯슨에서는 goal checker의 xy_goal_tolerance
 DENSITY = 0.05         # Route Server의 path_density와 같은 경로 점 간격(m)
-
-
-def route(graph_dir, nodes, a, b):
-    """그래프 파일에서 a → b 최소 비용 길을 찾아 촘촘한 경로로. 값은 Route Server와 같이: 엣지에 cost가 있으면 그 값, 없으면 길이."""
-    f = json.load(open(graph_dir + "/lane_graph.geojson"))["features"]
-    E = [(p["startid"], p["endid"], p.get("cost")) for p in (x["properties"] for x in f) if "startid" in p]
-    r, c, w = zip(*[(i, j, k if k is not None else float(np.linalg.norm(nodes.xy[i] - nodes.xy[j]))) for i, j, k in E])
-    d, pred = dijkstra(csr_matrix((w, (r, c)), shape=(len(nodes.xy),) * 2), indices=a, return_predecessors=True)
-    if not np.isfinite(d[b]):
-        return None
-    ids = [b]
-    while ids[-1] != a:
-        ids.append(int(pred[ids[-1]]))
-    P = nodes.xy[ids[::-1]]; s = G.arc(P); q = np.r_[np.arange(0, s[-1], DENSITY), s[-1]]
-    return np.c_[np.interp(q, s, P[:, 0]), np.interp(q, s, P[:, 1])]
 
 
 def drive(ph, path, segs, over, wait):
@@ -66,9 +49,9 @@ def main():
     nodes = G.Nodes(graph_dir + "/route_nodes.json"); wait = float(os.environ.get("WAIT", 1.0))
     over = dict(use_velocity_scaled_lookahead_dist=False, lookahead_dist=float(os.environ.get("LOOKFIX", 0.1)), min_lookahead_dist=0.05)
     model = build_model(PINKY_PRO + "/pinky_mujoco", out + "/model", world=os.path.dirname(HERE) + "/ros/empty_world.yaml", simple_render=True)
-    lines = []
+    graph, lines = G.Graph(graph_dir + "/lane_graph.geojson", nodes), []
     for i, (ta, tb) in enumerate(zip(sys.argv[3::2], sys.argv[4::2])):
-        a, b = nodes.pick(ta), nodes.pick(tb); path = route(graph_dir, nodes, a, b)
+        a, b = nodes.pick(ta), nodes.pick(tb); path = graph.route(a, b, DENSITY)
         if path is None:
             lines.append(f"{i} 노드 {a} → {b}: 길이 없음"); print(lines[-1]); continue
         stops = G.stops_on(path, nodes); segs = G.cut(path, [s for s, _ in stops])

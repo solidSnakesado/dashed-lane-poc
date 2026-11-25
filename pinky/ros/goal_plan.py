@@ -19,6 +19,7 @@ class Nodes:
         self.xy, self.yaw, self.zone = np.array(d["xy"]), np.array(d["yaw"]), np.array(d["zone"])
         self.wl, self.wr = np.array(d["wl"]), np.array(d["wr"])
         self.stops = [(int(k), float(v)) for k, v in d["stops"]]
+        self.map = d.get("map")                                          # 지도 그림 정보(없을 수 있음)
         self.tree = cKDTree(self.xy)
 
     def pick(self, text):
@@ -33,6 +34,27 @@ class Nodes:
         if not ok.any():
             raise ValueError(f"{text}: 가까이에 맞는 차로가 없음")
         return int(k[ok][0])
+
+
+class Graph:
+    """그래프 파일에서 최소 비용 길을 찾는다(미리 보기·ROS 없는 시험용). 값은 Route Server와 같이: 엣지에 cost가 있으면 그 값, 없으면 길이."""
+    def __init__(self, geojson, nodes):
+        from scipy.sparse import csr_matrix
+        E = [(p["startid"], p["endid"], p.get("cost")) for p in (x["properties"] for x in json.load(open(geojson))["features"]) if "startid" in p]
+        r, c, w = zip(*[(i, j, k if k is not None else float(np.linalg.norm(nodes.xy[i] - nodes.xy[j]))) for i, j, k in E])
+        self.m, self.nodes = csr_matrix((w, (r, c)), shape=(len(nodes.xy),) * 2), nodes
+
+    def route(self, a, b, density=0.05):
+        """a → b 길을 density(m) 간격의 점열로. 길이 없으면 None."""
+        from scipy.sparse.csgraph import dijkstra
+        d, pred = dijkstra(self.m, indices=a, return_predecessors=True)
+        if not np.isfinite(d[b]):
+            return None
+        ids = [b]
+        while ids[-1] != a:
+            ids.append(int(pred[ids[-1]]))
+        P = self.nodes.xy[ids[::-1]]; s = arc(P); q = np.r_[np.arange(0, s[-1], density), s[-1]]
+        return np.c_[np.interp(q, s, P[:, 0]), np.interp(q, s, P[:, 1])]
 
 
 def arc(path):
