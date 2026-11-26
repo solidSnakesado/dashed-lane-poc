@@ -3,12 +3,14 @@
   2) /lane_sim/reset (geometry_msgs/PoseStamped)을 받으면 로봇을 그 자세(지도 좌표, 바퀴 축 기준)에 다시 세우고
      오도메트리도 그 자세에서 시작한다. 지도(map) = 시뮬 세계(world) = odom 출발점이라 map→odom은 항등 변환으로 둔다.
      (처음에는 로봇을 원점에 두고 map→odom을 경로마다 바꿨으나, 두 번째 경로부터 주행이 어긋나 이 방식으로 바꿈)
+  4) /lane_sim/obstacle (geometry_msgs/PoseStamped): 세계 파일에 obstacle 상자가 있으면 그 자세로 옮긴다(frame_id = off면 치움). 다른 차량 흉내용.
   3) --delay: 실물 핑키에서 잰 무선 지연(2026-11-24, 젯슨↔핑키 같은 Wi-Fi)을 흉내 낸다.
      /cmd_vel은 받은 뒤 지연 분포에서 뽑은 시간만큼 늦게 바퀴에 반영하고 0.6%는 버린다.
      /odom과 odom→base_footprint TF도 같은 분포만큼 늦게 내보낸다(내용은 보낼 때가 아니라 잰 순간의 값).
      /ground_truth는 평가용이라 늦추지 않는다. 메시지 순서는 바뀌지 않게 한다(ROS2 reliable과 같음).
-바닥은 평평하고 벽이 없는 빈 세계(empty_world.yaml)라 로봇이 놓인 자리는 물리에 영향이 없다. 앞 카메라는 끈다(1단계는 비전 없음).
-사용(젯슨, ~/venvs/lane 파이썬, ROS2와 lane_ros_ws를 source한 상태): python lane_sim_bridge.py [--viewer] [--delay]
+바닥은 평평하고 벽이 없는 빈 세계(empty_world.yaml)가 기본이다. --world 파일(sdf)을 주면 그 세계(예: wall_map.py가 만든 벽)를 쓴다.
+앞 카메라는 끈다(1단계는 비전 없음).
+사용(ROS2와 lane_ros_ws를 source한 상태): python lane_sim_bridge.py [--viewer] [--delay] [--world walls.sdf]
 """
 import math, os, sys, time
 from pathlib import Path
@@ -32,6 +34,11 @@ class LaneBridge(Bridge):
     def __init__(self, physics, delay=False):
         super().__init__(physics)
         self.create_subscription(PoseStamped, "/lane_sim/reset", self.reset, 10)
+        m = physics.model; name = lambda i: physics.mj.mj_id2name(m, physics.mj.mjtObj.mjOBJ_GEOM, i) or ""
+        self.obst = [i for i in range(m.ngeom) if name(i).startswith("obstacle")]       # 세계 파일의 obstacle 상자(없으면 빈 목록)
+        if self.obst:
+            m.opt.disableflags |= int(physics.mj.mjtDisableBit.mjDSBL_MIDPHASE)         # 고정 물체를 옮긴 뒤에도 충돌이 계산되게(끄지 않으면 옮긴 상자를 뚫고 지나감)
+            self.create_subscription(PoseStamped, "/lane_sim/obstacle", self.obstacle, 10)
         self.delay, self.rng = delay, np.random.default_rng(0)
         self.cmd_q, self.state_q, self.last_cmd, self.last_state = collections.deque(), collections.deque(), 0.0, 0.0
         if delay:
@@ -91,11 +98,21 @@ class LaneBridge(Bridge):
         self.cmd_q.clear(); self.state_q.clear(); self.last_cmd = self.last_state = ph.data.time
         self.get_logger().info(f"리셋: ({p.position.x:.3f}, {p.position.y:.3f}, {math.degrees(yaw):.1f}도)에 세움, 오도메트리도 여기서 시작")
 
+    def obstacle(self, msg):
+        """장애물 상자를 그 자세에 놓는다(frame_id가 off면 땅속으로 치움). 라이다와 충돌에 바로 반영된다."""
+        m, p = self.physics.model, msg.pose; yaw = 2 * math.atan2(p.orientation.z, p.orientation.w)
+        for i in self.obst:
+            m.geom_pos[i] = [p.position.x, p.position.y, -1.0 if msg.header.frame_id == "off" else m.geom_size[i][2]]
+            m.geom_quat[i] = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
+        self.get_logger().info("장애물 치움" if msg.header.frame_id == "off" else f"장애물: ({p.position.x:.3f}, {p.position.y:.3f}, {math.degrees(yaw):.0f}도)")
+
+
 
 def main():
     config = str(SRC / "config" / "mujoco.yaml")
     out = os.environ.get("PINKY_MODEL_DIR", str(Path.home() / ".cache" / "lane_sim_model"))
-    model = build_model(SRC, out, None, config, str(HERE / "empty_world.yaml"), simple_render=True)
+    world = sys.argv[sys.argv.index("--world") + 1] if "--world" in sys.argv else str(HERE / "empty_world.yaml")   # 벽이 있는 세계(sdf)
+    model = build_model(SRC, out, None, config, world, simple_render=True)
     physics = Physics(model, config)
     physics.settings["camera"]["enabled"] = False
     rclpy.init()
