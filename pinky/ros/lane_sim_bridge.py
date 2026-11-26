@@ -3,6 +3,7 @@
   2) /lane_sim/reset (geometry_msgs/PoseStamped)을 받으면 로봇을 그 자세(지도 좌표, 바퀴 축 기준)에 다시 세우고
      오도메트리도 그 자세에서 시작한다. 지도(map) = 시뮬 세계(world) = odom 출발점이라 map→odom은 항등 변환으로 둔다.
      (처음에는 로봇을 원점에 두고 map→odom을 경로마다 바꿨으나, 두 번째 경로부터 주행이 어긋나 이 방식으로 바꿈)
+     frame_id가 odom0이면 로봇만 그 자세에 세우고 오도메트리는 (0, 0, 0)에서 시작한다(실물 핑키를 켠 것과 같음, SLAM·AMCL 예행용).
   4) /lane_sim/obstacle (geometry_msgs/PoseStamped): 세계 파일에 obstacle 상자가 있으면 그 자세로 옮긴다(frame_id = off면 치움). 다른 차량 흉내용.
   3) --delay: 실물 핑키에서 잰 무선 지연(2026-11-24, 젯슨↔핑키 같은 Wi-Fi)을 흉내 낸다.
      /cmd_vel은 받은 뒤 지연 분포에서 뽑은 시간만큼 늦게 바퀴에 반영하고 0.6%는 버린다.
@@ -93,10 +94,12 @@ class LaneBridge(Bridge):
         ph.data.qpos[3:7] = [math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]
         ph.data.ctrl[:] = 0.0
         ph.mj.mj_forward(ph.model, ph.data)
-        ph.odom[:] = [p.position.x, p.position.y, yaw]; ph.twist[:] = 0.0
+        zero = msg.header.frame_id == "odom0"                    # 실물처럼 켠 자리를 오도메트리 원점으로(SLAM·AMCL 예행용)
+        ph.odom[:] = [0.0, 0.0, 0.0] if zero else [p.position.x, p.position.y, yaw]; ph.twist[:] = 0.0
         self.command, self.command_time = (0.0, 0.0), -math.inf
         self.cmd_q.clear(); self.state_q.clear(); self.last_cmd = self.last_state = ph.data.time
-        self.get_logger().info(f"리셋: ({p.position.x:.3f}, {p.position.y:.3f}, {math.degrees(yaw):.1f}도)에 세움, 오도메트리도 여기서 시작")
+        self.get_logger().info(f"리셋: ({p.position.x:.3f}, {p.position.y:.3f}, {math.degrees(yaw):.1f}도)에 세움, "
+                               + ("오도메트리는 (0, 0, 0)에서 시작" if zero else "오도메트리도 여기서 시작"))
 
     def obstacle(self, msg):
         """장애물 상자를 그 자세에 놓는다(frame_id가 off면 땅속으로 치움). 라이다와 충돌에 바로 반영된다."""

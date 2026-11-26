@@ -6,9 +6,9 @@
       길이 없거나 컨트롤러가 주행을 끊으면 멈추고, RETRY초마다 지금 자리에서 경로를 다시 요청한다. 길이 나오면 다시 출발하고, HOLD초가 지나면 끝낸다.
       주행이 끝나면(어떻게 끝나든) 이 스크립트가 알렸던 닫기·비용은 모두 다시 열어 둔다.
       (새로 요청하면 Route Server가 라이다로 찾아 쌓아 둔 막힌 엣지 목록도 처음부터 다시 시작한다.)
-위치는 오도메트리만 쓴다(map→odom 항등). 정지선 처리는 하지 않는다(wall_map.py의 길에는 정지선이 없음).
+위치는 오도메트리만 쓴다(map→odom 항등). --align ALIGN_JSON을 주면 AMCL 위치로 달린다(amcl_runner.py, 그래프는 map_align.py가 옮긴 것). 정지선 처리는 하지 않는다(wall_map.py의 길에는 정지선이 없음).
 결과: NN.npy(시간, 실제 x, y, yaw, 추정 x, y, yaw, v, w), NN_paths.npz(받은 경로들), summary.txt.
-사용: python track_runner.py NODES_JSON OUT 출발 목적지 [b… | e…]... [출발 목적지 ...]      (lane_graph.geojson은 NODES_JSON과 같은 폴더)
+사용: python track_runner.py NODES_JSON OUT [--align ALIGN_JSON] 출발 목적지 [b… | e…]... [출발 목적지 ...]      (lane_graph.geojson은 NODES_JSON과 같은 폴더)
   출발·목적지 = 노드 번호.
   b노드 = 장애물이 처음부터 그 노드 자리에 있음.  b노드@거리 = 로봇이 그 거리(m) 안으로 오면 나타남.
   e종류:A-B@시각 = 출발 뒤 그 시각(초)에 도로 사정을 알림. 종류 = close, open, cost(이때는 A-B=값). 여러 개 가능.
@@ -24,12 +24,15 @@ HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 from route_runner import Runner
 from goal_runner import place
 from road_event import Road, parse
+from amcl_runner import AmclRunner, place_amcl, est_error
 import goal_plan as G
 
 BOX = (0.12, 0.12)     # 장애물 상자의 앞뒤, 좌우 길이(m). wall_map.py의 OBSTACLE과 같아야 함
 BODY = 0.058           # 로봇 몸체 반폭(m). 장애물과의 여유를 이 값만큼 빼서 본다
 SLOW = 0.05            # 시간 한도 = 차로 0의 길이/이 속도 + 30초(시뮬 초)
 RETRY, HOLD = 1.0, 30.0   # 길이 없어 멈췄을 때: 이 간격(초)으로 다시 요청하고, 이 시간(초)이 지나도 안 열리면 끝냄
+CONFIRM = 0.5          # 멈춘 뒤 다시 받은 경로가 이 시간(초) 동안 막히지 않아야 출발. 새 요청은 Route Server가 라이다로 찾은 막힘을
+                       # 잊고 시작하므로, 바로 출발하면 장애물로 다시 들어갔다 멈추기를 되풀이했다(2026-11-26, 0.25 m 앞 장애물 70초)
 OK = 4                 # action_msgs/GoalStatus.STATUS_SUCCEEDED
 
 
@@ -41,6 +44,8 @@ def box_dist(R, c, yaw):
 
 def obstacle(n, pub, pose=None):
     m = PoseStamped(); m.header.frame_id = "off" if pose is None else "map"; m.pose.orientation.w = 1.0
+    if pose is not None and getattr(n, "amcl", False):
+        pose = n.to_world(*pose)                                         # 브리지는 시뮬 세계(도면) 좌표로 받는다
     if pose is not None:
         m.pose.position.x, m.pose.position.y = float(pose[0]), float(pose[1])
         m.pose.orientation.z, m.pose.orientation.w = math.sin(pose[2] / 2), math.cos(pose[2] / 2)
@@ -59,7 +64,7 @@ def drive(n, track_ac, pub, road, nodes, a, b, block, events, limit):
     """노드 a → b. block = (노드, 나타나는 거리 또는 None) 또는 None. events = [(시각, kind, A, B, 값)]. limit = 시간 한도(시뮬 초).
     돌려주는 값: (기록 R, 받은 경로들, 결과 글자, 장애물 자세, 한 일 기록)."""
     obstacle(n, pub)
-    if not place(n, float(nodes.xy[a, 0]), float(nodes.xy[a, 1]), float(nodes.yaw[a])):
+    if not (place_amcl if getattr(n, "amcl", False) else place)(n, float(nodes.xy[a, 0]), float(nodes.xy[a, 1]), float(nodes.yaw[a])):
         return None, [], "로봇을 출발지에 세우지 못함(브리지가 떠 있는지 확인)", None, []
     box = None if block is None else (float(nodes.xy[block[0], 0]), float(nodes.xy[block[0], 1]), float(nodes.yaw[block[0]]))
     shown = box is None
@@ -73,7 +78,7 @@ def drive(n, track_ac, pub, road, nodes, a, b, block, events, limit):
         g = ComputeAndTrackRoute.Goal(); g.start_id, g.goal_id, g.use_start, g.use_poses = start, b, False, False
         st["pend"], st["th"], st["tr"] = track_ac.send_goal_async(g, feedback_callback=on_fb), None, None
     now = lambda: n.get_clock().now().nanoseconds * 1e-9
-    paths, ff, fh, fr = [], None, None, None; n.rows = []; t0 = now(); t_arr = hold = retry = None; done = None; ask(a)
+    paths, ff, fh, fr = [], None, None, None; n.rows = []; t0 = now(); hold = retry = confirm = None; done = None; ask(a)
     while done is None:
         rclpy.spin_once(n, timeout_sec=0.01); t = now() - t0
         if st["pend"] is not None and st["pend"].done():
@@ -86,13 +91,19 @@ def drive(n, track_ac, pub, road, nodes, a, b, block, events, limit):
         while events and t >= events[0][0]:                              # 정해 둔 시각에 도로 사정을 알림(닫기, 열기, 비용)
             _, kind, ea, eb, val = events.pop(0); cnt, _ = road.send(kind, ea, eb, val); touched.append((kind, ea, eb))
             log.append(f"{t:.1f}s {kind} {ea}-{eb}(엣지 {cnt}개)")
-        if st["new"] is not None and ff is None:                         # 새 경로 → RPP에 다시 보냄(앞의 주행은 컨트롤러가 바꿔치기함)
+        if hold is not None and st["new"] is not None:                   # 멈춘 뒤 받은 경로는 CONFIRM초 동안 다시 막히지 않아야 출발한다
+            if st["tr"] is not None and st["tr"].done():
+                st["new"], confirm = None, None                          # 그 사이 Route Server가 막혔다고 끝냄(라이다에 장애물이 그대로 있음)
+            elif confirm is None:
+                confirm = t
+        go = hold is None or (confirm is not None and t - confirm >= CONFIRM)
+        if st["new"] is not None and ff is None and go:                  # 새 경로 → RPP에 다시 보냄(앞의 주행은 컨트롤러가 바꿔치기함)
             msg, st["new"] = st["new"], None
             paths.append((t, np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])))
             fg = FollowPath.Goal(); fg.path = msg; fg.controller_id, fg.goal_checker_id = "FollowPath", "general_goal_checker"
             ff = n.follow_ac.send_goal_async(fg)
             if hold is not None:
-                log.append(f"{t:.1f}s 다시 출발(멈춰 있던 시간 {t - hold:.1f}s)"); hold = None
+                log.append(f"{t:.1f}s 다시 출발(멈춰 있던 시간 {t - hold:.1f}s)"); hold = confirm = None
         if ff is not None and ff.done():
             fh = ff.result(); ff = None; fr = fh.get_result_async() if fh.accepted else None
             if fr is None:
@@ -103,12 +114,10 @@ def drive(n, track_ac, pub, road, nodes, a, b, block, events, limit):
         elif hold is None and fr is not None and ff is None and st["new"] is None and fr.done():
             if fr.result().status != OK:
                 fail = f"주행이 끊김(컨트롤러 오류 {fr.result().result.error_code})"
-            elif (tr is not None and tr.done()) or (t_arr is not None and t - t_arr > 2.0):
-                done = "도착"
-            elif t_arr is None:
-                t_arr = t                                                # 주행은 끝났는데 추적이 안 끝난 경우 2초만 더 기다림
+            else:
+                done = "도착"                                            # 마지막 경로를 끝까지 달림. 추적이 안 끝났으면 아래에서 취소한다
         if fail and hold is None:                                        # 멈추고, RETRY초마다 지금 자리에서 경로를 다시 요청
-            hold, retry = t, None; log.append(f"{t:.1f}s 멈춤: {fail}")
+            hold, retry, confirm = t, t, None; log.append(f"{t:.1f}s 멈춤: {fail}")
             if fh is not None:
                 fh.cancel_goal_async()
             fh = fr = None
@@ -119,10 +128,10 @@ def drive(n, track_ac, pub, road, nodes, a, b, block, events, limit):
                 retry = t; ask(nearest(nodes, n.odom))
         if done is None and t > limit:
             done = "시간 초과"
-    if done != "도착":
-        for h in (fh, st["th"]):
-            if h is not None:
-                h.cancel_goal_async()
+    if done != "도착" and fh is not None:
+        fh.cancel_goal_async()
+    if st["th"] is not None and not (st["tr"] is not None and st["tr"].done()):
+        st["th"].cancel_goal_async()         # 도착 판정 거리(0.02 m)가 노드 간격(0.01 m)보다 커서, 로봇이 마지막 앞 노드를 지나지 않고 서면 추적이 끝나지 않는다
     for kind, ea, eb in touched:                                         # 알렸던 도로 사정은 모두 되돌려 놓음(다음 주행에 남지 않게)
         if kind != "open":
             road.send("open", ea, eb, reroute=False)
@@ -133,7 +142,7 @@ def drive(n, track_ac, pub, road, nodes, a, b, block, events, limit):
     return R, paths, done, box, log
 
 
-def report(i, a, b, block, R, paths, done, box, nodes, lane_n, log):
+def report(i, a, b, block, R, paths, done, box, nodes, lane_n, log, amcl=False):
     """요약 한 줄. 차로 = 가장 가까운 차로 점의 차로 번호(차선 변경 길의 점은 빼고 봄)."""
     lane_xy = nodes.xy[nodes.zone == 0]; lane_of = lambda p: int(np.argmin(np.linalg.norm(lane_xy - p, axis=1))) // lane_n
     v = np.r_[0.0, np.linalg.norm(np.diff(R[:, 1:3], axis=0), axis=1) / np.maximum(np.diff(R[:, 0]), 1e-6)]
@@ -144,10 +153,15 @@ def report(i, a, b, block, R, paths, done, box, nodes, lane_n, log):
         d = box_dist(R, np.array(box[:2]), box[2]); k = int(np.argmin(d)); gap = (d[k] - BODY) * 1000
         s += (f" | 장애물 노드 {block[0]}(차로 {lane_of(np.array(box[:2]))})" + ("" if block[1] is None else f", {block[1]} m에서 나타남")
               + f": 가장 가까울 때 몸체 옆 여유 약 {gap:.0f} mm, 그때 차로 {lane_of(R[k, 1:3])}" + (" ← 닿음" if gap <= 0 else ""))
+    if amcl:
+        s += " | " + est_error(R)
     return s + ("" if not log else "\n   " + " / ".join(log))
 
 
 def main():
+    align = sys.argv[sys.argv.index("--align") + 1] if "--align" in sys.argv else None
+    if align:
+        sys.argv[sys.argv.index("--align"):sys.argv.index("--align") + 2] = []
     nodes, out = G.Nodes(sys.argv[1]), sys.argv[2]; os.makedirs(out, exist_ok=True)
     r0 = json.load(open(sys.argv[1]))["routes"][0]; lane_n = r0["goal"] - r0["start"] + 1      # 차로 하나의 점 수(차로 k의 점은 노드 k*lane_n부터)
     jobs, args = [], sys.argv[3:]
@@ -161,7 +175,7 @@ def main():
             else:                                                        # e종류:A-B[=값]@시각
                 kind, rest = t[1:].split(":"); rng, at = rest.split("@"); events.append((float(at),) + parse(kind, rng))
         jobs.append((a, b, block, events))
-    rclpy.init(); n = Runner()
+    rclpy.init(); n = AmclRunner(align) if align else Runner()
     track_ac = ActionClient(n, ComputeAndTrackRoute, "compute_and_track_route"); pub = n.create_publisher(PoseStamped, "/lane_sim/obstacle", 10)
     road = Road(n, os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "lane_graph.geojson"))
     track_ac.wait_for_server(); n.follow_ac.wait_for_server(); n.map_odom(); n.wait(1.0)
@@ -171,7 +185,7 @@ def main():
         if R is None:
             lines.append(f"{i} 노드 {a} → {b}: {done}"); print(lines[-1], flush=True); continue
         np.save(f"{out}/{i:02d}.npy", R); np.savez(f"{out}/{i:02d}_paths.npz", t=[t for t, _ in paths], **{f"p{k}": p for k, (_, p) in enumerate(paths)})
-        lines.append(report(i, a, b, block, R, paths, done, box, nodes, lane_n, log)); print(lines[-1], flush=True)
+        lines.append(report(i, a, b, block, R, paths, done, box, nodes, lane_n, log, bool(align))); print(lines[-1], flush=True)
     open(out + "/summary.txt", "w").write("\n".join(lines) + "\n")
     n.destroy_node(); rclpy.shutdown()
 

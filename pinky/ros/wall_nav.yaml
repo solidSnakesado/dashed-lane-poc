@@ -19,8 +19,10 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      resolution: 0.02                       # 핑키 설정 0.05 m 칸은 벽과의 여유(약 4~5 cm)보다 커서 줄임
-      width: 2                               # 칸이 작아진 만큼 창을 줄임(3 m → 2 m, 100x100칸)
+      # 핑키 설정 0.05 m 칸은 벽과의 여유(약 4~5 cm)보다 커서 줄임. 처음에는 0.02로 했으나 굽은 구간 바깥쪽 차로에서 RPP 충돌 경고가 나고
+      # 주행이 한 번 끊겼다(2026-11-26). 그 자리에서 발자국 모서리와 벽 사이는 약 2.8 cm인데, 벽이 든 칸은 길 쪽으로 최대 한 칸 튀어나와 보인다.
+      resolution: 0.01
+      width: 2                               # 칸이 작아진 만큼 창을 줄임(3 m → 2 m, 200x200칸)
       height: 2
       footprint_padding: 0.01                # Nav2 기본값과 같음(핑키 설정의 로컬 코스트맵에는 지정이 없음). 값을 드러내 두려고 적음
       inflation_layer:
