@@ -97,7 +97,7 @@ def place_amcl(n, x, y, yaw):
         if sent is None or time.monotonic() - sent > 1.0:
             n.initial(x, y, yaw); sent = time.monotonic()
         rclpy.spin_once(n, timeout_sec=0.01)
-        if near(n.amcl_pose, q):
+        if near(n.amcl_pose, q) and near(n.odom, q):                     # TF(map → base_footprint)도 따라와야 함: 늦으면 코스트맵에 엉뚱한 자리의 벽이 찍힘(2026-11-27 실물)
             n.wait(0.5)
             if n.clear.wait_for_service(timeout_sec=2.0):
                 f = n.clear.call_async(ClearEntireCostmap.Request()); rclpy.spin_until_future_complete(n, f, timeout_sec=2.0)

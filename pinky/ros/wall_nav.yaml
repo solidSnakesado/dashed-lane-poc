@@ -24,7 +24,10 @@ local_costmap:
       resolution: 0.01
       width: 2                               # 칸이 작아진 만큼 창을 줄임(3 m → 2 m, 200x200칸)
       height: 2
-      footprint_padding: 0.01                # Nav2 기본값과 같음(핑키 설정의 로컬 코스트맵에는 지정이 없음). 값을 드러내 두려고 적음
+      # 핑키 설정은 12 x 12 cm 정사각형(중심 기준 ±0.06). 실물 외곽은 앞 +0.042, 뒤 -0.076, 옆 ±0.055 m(pinky_real_robot_values.md, URDF 값)라 실물에 맞춤(2026-11-27).
+      # 정사각형이면 옆으로 6 cm를 차지해 1 cm 여유로 그린 회피 길에서 RPP가 충돌로 보고 멈췄다(real_c7_12, 오류 104).
+      footprint: '[[0.042, 0.055], [0.042, -0.055], [-0.076, -0.055], [-0.076, 0.055]]'
+      footprint_padding: 0.0                 # 사용자 요구: 양쪽 1 cm 틈이면 지나감(2026-11-27). Nav2 기본 0.01이면 1 cm 틈에서 RPP가 충돌로 봄
       inflation_layer:
         cost_scaling_factor: 3.0
         inflation_radius: 0.10               # 핑키 설정 0.15 m. 차로 가운데(벽까지 약 0.11 m)의 비용을 낮춤
@@ -47,6 +50,6 @@ route_server:
       costmap_topic: "local_costmap/costmap_raw"   # 라이다 장애물이 들어가는 로컬 코스트맵. 좌표가 odom이라 map = odom일 때만 맞는다(지금 시뮬)
       rate: 10.0                                   # 초당 검사 횟수(기본 1.0). 검사 한 번에 막힌 엣지 하나만 찾으므로 자주 본다
       max_collision_dist: 1.0                      # 로봇 앞 이 거리(m)까지의 경로를 검사(기본 5.0)
-      max_cost: 253.0                              # 로봇 중심이 놓일 수 없는 칸(기본값)
+      max_cost: 254.0                              # 장애물과 겹치는 칸만 막힘으로 봄(닿는지는 RPP가 검사)
       reroute_on_collision: true
     aggregate_blocked_ids: true                    # 막힌 엣지를 쌓아 둔다(기본 false면 직전 것만 기억해서 같은 길을 다시 고름)

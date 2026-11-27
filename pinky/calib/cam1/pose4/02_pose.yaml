@@ -1,0 +1,10 @@
+height_m: 0.0602
+pitch_down_deg: 8.96
+roll_deg: -3.14
+yaw_to_board_deg: 1.33
+dist_to_board_m: 0.5536
+bottom_row_height_m: -0.015
+reproj_err_px_mean: 0.49
+reproj_err_px_max: 0.802
+calib: pinky/calib/cam1/ost.yaml
+topic: /camera/image_raw/compressed

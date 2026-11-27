@@ -1,0 +1,8 @@
+# 1호기 앞 카메라 장착 자세(2026-11-27). 측정: cam_pose.py, 세운 체커보드, pose4 저장 3번의 평균
+height_m: 0.062           # 핑키가 선 면에서 렌즈 가운데까지 높이(자로 실측 62 mm. cam_pose.py 값 60.4 mm는 박스 높이 어림이 섞임)
+pitch_down_deg: 8.98      # 숙인 각도, 아래로 +(측정. URDF cam_tilt_deg 기본 8)
+roll_deg: -3.14           # 옆 기울기, 영상 오른쪽이 위로 +(측정. 판 기울기 0.5도가 섞일 수 있음)
+yaw_deg: 0.0              # 몸체 앞 기준 좌우 방향(측정 못 함, 5단계에서 확인)
+x_m: 0.0365               # 몸체 기준점(base_footprint) 앞 거리(URDF 값으로 계산)
+y_m: 0.0                  # 좌우 위치(URDF)
+intrinsics: ost.yaml
