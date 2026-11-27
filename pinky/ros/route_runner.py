@@ -21,8 +21,8 @@ yaw_of = lambda q: math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + 
 
 
 class Runner(Node):
-    def __init__(self):
-        super().__init__("lane_route_runner", parameter_overrides=[Parameter("use_sim_time", value=True)])
+    def __init__(self, real=False):                                      # real: 실물(시뮬 시간 끔)
+        super().__init__("lane_route_runner", parameter_overrides=[Parameter("use_sim_time", value=not real)])
         self.route_ac = ActionClient(self, ComputeRoute, "compute_route")
         self.follow_ac = ActionClient(self, FollowPath, "follow_path")
         self.reset_pub = self.create_publisher(PoseStamped, "/lane_sim/reset", 10)

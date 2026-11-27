@@ -1,0 +1,40 @@
+# 실물 핑키로 달릴 때 마지막에 덮어 읽는 값(lane_nav.launch.py, wall_slam.launch.py의 sim:=false). 핑키 설정을 바꾸자는 것이 아님.
+#  - 시뮬 시간을 끈다(모든 노드).
+#  - 라이다는 장착 각도를 고친 /scan_fix(scan_fix.py가 냄)를 쓴다.
+#  - 처음에는 느리게: RPP 목표 속도 0.2 → 0.1 m/s(시뮬은 0.2로 확인).
+# use_sim_time은 앞 파일들이 노드 이름으로 true를 적어 두었으므로, 와일드카드(/**)만으로는 덮어쓰지 못할 수 있어 노드마다 적는다.
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    FollowPath:
+      desired_linear_vel: 0.1
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      voxel_layer:
+        scan:
+          topic: /scan_fix
+
+route_server:
+  ros__parameters:
+    use_sim_time: false
+
+lifecycle_manager_lane:
+  ros__parameters:
+    use_sim_time: false
+
+map_server:
+  ros__parameters:
+    use_sim_time: false
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    scan_topic: scan_fix
+
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    scan_topic: /scan_fix

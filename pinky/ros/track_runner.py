@@ -3,16 +3,15 @@
 흐름: 출발지에 로봇을 세움 → (장애물을 놓음) → compute_and_track_route 요청 → 피드백의 rerouted가 참일 때마다 그 경로를 follow_path로 보냄
       → 경로가 다시 구해지는 경우: Route Server의 CollisionMonitor가 앞쪽 경로에서 막힌 엣지를 찾았을 때(라이다),
         또는 밖에서 도로 사정을 알렸을 때(road_event.py: 닫기, 열기, 비용 → 다시 구하기 요청).
-      길이 없거나 컨트롤러가 주행을 끊으면 멈추고, RETRY초마다 지금 자리에서 경로를 다시 요청한다. 길이 나오면 다시 출발하고, HOLD초가 지나면 끝낸다.
-      주행이 끝나면(어떻게 끝나든) 이 스크립트가 알렸던 닫기·비용은 모두 다시 열어 둔다.
-      (새로 요청하면 Route Server가 라이다로 찾아 쌓아 둔 막힌 엣지 목록도 처음부터 다시 시작한다.)
+      길이 없거나 컨트롤러가 주행을 끊으면 멈추고, RETRY초마다 지금 자리에서 다시 요청한다(Route Server가 라이다로 쌓은 막힘은 새 요청에서 지워짐).
+      길이 나오면 다시 출발하고, HOLD초가 지나면 끝낸다. 주행이 끝나면 이 스크립트가 알렸던 닫기·비용은 모두 다시 열어 둔다.
 위치는 오도메트리만 쓴다(map→odom 항등). --align ALIGN_JSON을 주면 AMCL 위치로 달린다(amcl_runner.py, 그래프는 map_align.py가 옮긴 것). 정지선 처리는 하지 않는다(wall_map.py의 길에는 정지선이 없음).
 결과: NN.npy(시간, 실제 x, y, yaw, 추정 x, y, yaw, v, w), NN_paths.npz(받은 경로들), summary.txt.
-사용: python track_runner.py NODES_JSON OUT [--align ALIGN_JSON] 출발 목적지 [b… | e…]... [출발 목적지 ...]      (lane_graph.geojson은 NODES_JSON과 같은 폴더)
+실물: --real --align ALIGN_JSON. 로봇은 사람이 출발 노드 자리에 놓고, 장애물은 사람이 놓는다(b는 못 씀). 기록은 추정 위치만.
+사용: python track_runner.py NODES_JSON OUT [--align ALIGN_JSON [--real]] 출발 목적지 [b… | e…]... [출발 목적지 ...]      (lane_graph.geojson은 NODES_JSON과 같은 폴더)
   출발·목적지 = 노드 번호.
   b노드 = 장애물이 처음부터 그 노드 자리에 있음.  b노드@거리 = 로봇이 그 거리(m) 안으로 오면 나타남.
   e종류:A-B@시각 = 출발 뒤 그 시각(초)에 도로 사정을 알림. 종류 = close, open, cost(이때는 A-B=값). 여러 개 가능.
-  예: python track_runner.py route_nodes.json out 0 232 b120   0 232 eclose:100-140@2 eopen:100-140@6
 """
 import json, math, os, sys
 import numpy as np
@@ -43,6 +42,8 @@ def box_dist(R, c, yaw):
 
 
 def obstacle(n, pub, pose=None):
+    if getattr(n, "real", False):
+        return                                                           # 실물: 시뮬 장애물 없음(상자는 사람이 놓음)
     m = PoseStamped(); m.header.frame_id = "off" if pose is None else "map"; m.pose.orientation.w = 1.0
     if pose is not None and getattr(n, "amcl", False):
         pose = n.to_world(*pose)                                         # 브리지는 시뮬 세계(도면) 좌표로 받는다
@@ -162,6 +163,11 @@ def main():
     align = sys.argv[sys.argv.index("--align") + 1] if "--align" in sys.argv else None
     if align:
         sys.argv[sys.argv.index("--align"):sys.argv.index("--align") + 2] = []
+    real = "--real" in sys.argv
+    if real:
+        sys.argv.remove("--real")
+        if not align or any(t.startswith("b") for t in sys.argv[3:]):
+            print("--real은 --align과 함께 쓰고, b(시뮬 장애물)는 쓸 수 없음"); return
     nodes, out = G.Nodes(sys.argv[1]), sys.argv[2]; os.makedirs(out, exist_ok=True)
     r0 = json.load(open(sys.argv[1]))["routes"][0]; lane_n = r0["goal"] - r0["start"] + 1      # 차로 하나의 점 수(차로 k의 점은 노드 k*lane_n부터)
     jobs, args = [], sys.argv[3:]
@@ -175,7 +181,7 @@ def main():
             else:                                                        # e종류:A-B[=값]@시각
                 kind, rest = t[1:].split(":"); rng, at = rest.split("@"); events.append((float(at),) + parse(kind, rng))
         jobs.append((a, b, block, events))
-    rclpy.init(); n = AmclRunner(align) if align else Runner()
+    rclpy.init(); n = AmclRunner(align, real) if align else Runner()
     track_ac = ActionClient(n, ComputeAndTrackRoute, "compute_and_track_route"); pub = n.create_publisher(PoseStamped, "/lane_sim/obstacle", 10)
     road = Road(n, os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "lane_graph.geojson"))
     track_ac.wait_for_server(); n.follow_ac.wait_for_server(); n.map_odom(); n.wait(1.0)
@@ -185,7 +191,7 @@ def main():
         if R is None:
             lines.append(f"{i} 노드 {a} → {b}: {done}"); print(lines[-1], flush=True); continue
         np.save(f"{out}/{i:02d}.npy", R); np.savez(f"{out}/{i:02d}_paths.npz", t=[t for t, _ in paths], **{f"p{k}": p for k, (_, p) in enumerate(paths)})
-        lines.append(report(i, a, b, block, R, paths, done, box, nodes, lane_n, log, bool(align))); print(lines[-1], flush=True)
+        lines.append(report(i, a, b, block, R, paths, done, box, nodes, lane_n, log, bool(align) and not real)); print(lines[-1], flush=True)
     open(out + "/summary.txt", "w").write("\n".join(lines) + "\n")
     n.destroy_node(); rclpy.shutdown()
 

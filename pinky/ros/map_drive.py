@@ -6,7 +6,10 @@
 따라가기는 /ground_truth(실제 위치)로 한다. 지도를 만드는 SLAM 쪽은 /odom과 /scan만 쓰므로 결과에는 영향이 없다.
 속도 V(0.05 m/s), 회전 W(0.3 rad/s): SLAM 지도가 번지지 않게 느리게(2026-11-26 대화의 기준 범위 안).
 결과: OUT/map_drive.npy(시간, 실제 x, y, yaw, 오도메트리 x, y, yaw). 나중에 지도 좌표와 비교할 때 쓴다.
-사용: python map_drive.py OUT [--place | --go]        환경 변수 LOOPS(왕복 횟수)
+사용: python map_drive.py OUT [--place | --go | --real]        환경 변수 LOOPS(왕복 횟수)
+  --real: 실물. 로봇을 길 가운데 출발 자리(바닥 표시)에 진행 방향으로 놓고 SLAM을 켠 뒤 실행한다. 따라가기는 오도메트리로 하고
+          (처음 받은 값을 출발 자리로 봄), 명령은 /cmd_vel_pc로 보낸다(핑키의 cmd_guard.py가 /cmd_vel로 넘김). 시뮬 시간은 끈다.
+          오도메트리 오차만큼 길 가운데에서 벗어난다(시뮬에서 9.3 m에 약 33 mm). 벽까지는 약 0.21 m.
   --place: 출발 자리에 세우기만 하고 끝냄 → SLAM을 켬 → --go: 세우지 않고 지금 자리에서 주행.
   SLAM은 로봇을 세운 뒤에 켜야 한다. 먼저 켜 두면 원점에서 본 스캔이 지도에 남고, 세우는 순간 위치가 0.58 m 뛰어
   지도가 약 10도 돌고 휘었다(2026-11-26 첫 지도: 도면 벽과의 어긋남 95% 17 mm, 최대 39 mm). 실물은 켠 자리에서 바로 SLAM을 켜면 된다.
@@ -28,15 +31,20 @@ wrap = lambda a: (a + math.pi) % (2 * math.pi) - math.pi
 
 
 class Drive(Node):
-    def __init__(self):
-        super().__init__("map_drive", parameter_overrides=[Parameter("use_sim_time", value=True)])
-        self.cmd = self.create_publisher(Twist, "/cmd_vel", 10); self.reset_pub = self.create_publisher(PoseStamped, "/lane_sim/reset", 10)
+    def __init__(self, real=False):
+        super().__init__("map_drive", parameter_overrides=[Parameter("use_sim_time", value=not real)]); self.real, self.odom0 = real, None
+        self.cmd = self.create_publisher(Twist, "/cmd_vel_pc" if real else "/cmd_vel", 10); self.reset_pub = self.create_publisher(PoseStamped, "/lane_sim/reset", 10)
         self.create_subscription(PoseStamped, "/ground_truth", self.on_truth, 50)
         self.create_subscription(Odometry, "/odom", self.on_odom, 50)
         self.truth = self.odom = None; self.rows = []
 
     def on_odom(self, m):
         p = m.pose.pose; self.odom = (p.position.x, p.position.y, yaw_of(p.orientation))
+        if self.real:                                                    # 실물: 처음 받은 오도메트리 자리 = 길 가운데 출발 자리(사람이 표시한 곳에 놓음)
+            self.odom0 = self.odom0 or self.odom; x0, y0, a0 = self.odom0; dx, dy = self.odom[0] - x0, self.odom[1] - y0
+            c, s = math.cos(-a0), math.sin(-a0); u, v = c * dx - s * dy, s * dx + c * dy
+            self.truth = (M.START[0] + u, M.START[1] + v, wrap(self.odom[2] - a0))
+            self.rows.append([self.get_clock().now().nanoseconds * 1e-9, *self.truth, *self.odom])
 
     def on_truth(self, m):
         p = m.pose; self.truth = (p.position.x, p.position.y, yaw_of(p.orientation))
@@ -87,14 +95,14 @@ class Drive(Node):
 def main():
     out = sys.argv[1]; os.makedirs(out, exist_ok=True); loops = int(os.environ.get("LOOPS", 2))
     U = np.arange(0.0, M.TOTAL + 1e-9, 0.01); fwd = np.array([M.point(u, 0.0) for u in U]); back = fwd[::-1]
-    rclpy.init(); n = Drive()
+    real = "--real" in sys.argv; rclpy.init(); n = Drive(real)
     while n.truth is None or n.odom is None:
         n.step()
-    if "--go" not in sys.argv and not n.place(float(fwd[0, 0]), float(fwd[0, 1]), 0.0):
+    if not real and "--go" not in sys.argv and not n.place(float(fwd[0, 0]), float(fwd[0, 1]), 0.0):
         print("로봇을 출발 자리에 세우지 못함(브리지가 떠 있는지 확인)"); return
     if "--place" in sys.argv:
         print(f"출발 자리에 세움: 실제 ({n.truth[0]:.3f}, {n.truth[1]:.3f}), 오도메트리 ({n.odom[0]:.3f}, {n.odom[1]:.3f}). 이제 SLAM을 켜고 --go로 주행"); return
-    if "--go" in sys.argv and math.hypot(n.truth[0] - fwd[0, 0], n.truth[1] - fwd[0, 1]) > 0.02:
+    if not real and "--go" in sys.argv and math.hypot(n.truth[0] - fwd[0, 0], n.truth[1] - fwd[0, 1]) > 0.02:
         print("로봇이 출발 자리에 없음(먼저 --place)"); return
     t0 = n.get_clock().now().nanoseconds * 1e-9
     print(f"출발: 길 가운데 ({fwd[0, 0]:.3f}, {fwd[0, 1]:.3f}), 길이 {M.TOTAL:.2f} m, 왕복 {loops}번, {V} m/s", flush=True)
@@ -103,7 +111,7 @@ def main():
         print(f"왕복 {i + 1} 끝: {n.get_clock().now().nanoseconds * 1e-9 - t0:.0f}s", flush=True)
     R = np.array(n.rows); R[:, 0] -= t0; np.save(out + "/map_drive.npy", R)
     e = np.hypot(R[-1, 1] - fwd[0, 0], R[-1, 2] - fwd[0, 1])
-    print(f"끝: {R[-1, 0]:.0f}s, 출발 자리와의 차이 {e * 1000:.0f} mm, 오도메트리 끝 값 ({R[-1, 4]:.3f}, {R[-1, 5]:.3f}, {math.degrees(R[-1, 6]):.1f}도) → {out}")
+    print(f"끝: {R[-1, 0]:.0f}s, 출발 자리와의 차이 {e * 1000:.0f} mm{'(오도메트리 기준, 실제는 자로 재기)' if real else ''}, 오도메트리 끝 값 ({R[-1, 4]:.3f}, {R[-1, 5]:.3f}, {math.degrees(R[-1, 6]):.1f}도) → {out}")
     n.destroy_node(); rclpy.shutdown()
 
 

@@ -7,6 +7,7 @@
     (= AMCL이 낸 map → odom + 지금 오도메트리, 컨트롤러가 쓰는 위치와 같음).
     처음에는 /amcl_pose를 썼으나, 그것은 AMCL이 갱신할 때(2 cm마다)만 나와서 주행 중에는 늘 늦은 값이었다(2026-11-26: 오차 중앙 30~40 mm로 크게 나옴).
   - map → odom 변환은 AMCL이 낸다(Runner가 내던 항등 변환은 내지 않음).
+실물(real=True, track_runner.py --real): 시뮬 시간을 끄고, 로봇을 옮기지 않으며(사람이 출발 노드 자리에 놓음), 실제 위치가 없으므로 추정 위치만 기록한다.
 로봇을 세운 뒤 /initialpose로 AMCL에 그 자리를 알리고, AMCL 추정이 그 자리로 올 때까지 기다린 뒤 로컬 코스트맵을 비운다.
   (시뮬에서 로봇을 순간 이동시키면 AMCL이 따라잡기 전의 스캔이 엉뚱한 자리에 벽으로 남아, 출발 직후 충돌 경고와 경로 다시 구하기가 났다(2026-11-26).
    실물은 순간 이동이 없으므로 이 단계는 시뮬에서만 필요하다.)
@@ -27,9 +28,11 @@ COV = (0.02 ** 2, math.radians(3) ** 2)   # 초기 위치를 알릴 때의 분�
 class AmclRunner(Runner):
     amcl = True
 
-    def __init__(self, align):
+    def __init__(self, align, real=False):
         a = json.load(open(align))["drawing_to_map"]; self.th, self.t = float(a["theta"]), np.array([a["tx"], a["ty"]], float)
-        super().__init__(); self.amcl_pose = None
+        super().__init__(real); self.amcl_pose, self.real = None, real
+        if real:                                                         # 실물: 실제 위치가 없으므로 추정 위치를 두 칸에 모두 적어 기록
+            self.create_timer(0.05, self.record)
         self.buf = Buffer(); self.listener = TransformListener(self.buf, self)
         self.clear = self.create_client(ClearEntireCostmap, "local_costmap/clear_entirely_local_costmap")
         self.create_subscription(PoseWithCovarianceStamped, "/amcl_pose", self.on_amcl, 10)
@@ -49,13 +52,19 @@ class AmclRunner(Runner):
     def on_amcl(self, m):
         p = m.pose.pose; self.amcl_pose = np.array([p.position.x, p.position.y, yaw_of(p.orientation)])
 
+    def record(self):
+        self.on_truth(None)
+        if self.rows is not None and self.odom is not None:
+            self.rows.append([self.get_clock().now().nanoseconds * 1e-9, *self.odom, *self.odom, *self.cmd])
+
     def on_truth(self, m):
         try:                                                             # 컨트롤러가 쓰는 것과 같은 지금 위치
             t = self.buf.lookup_transform("map", "base_footprint", Time()).transform
             self.odom = np.array([t.translation.x, t.translation.y, yaw_of(t.rotation)])
         except Exception:
             pass
-        super().on_truth(m)
+        if m is not None:
+            super().on_truth(m)
 
     def map_odom(self):
         pass
@@ -75,6 +84,8 @@ def near(p, q, tol=TOL):
 def place_amcl(n, x, y, yaw):
     """지도 좌표 (x, y, yaw)에 로봇을 세우고 AMCL에 알린다. 실제 위치와 AMCL 추정이 모두 그 자리로 오면 True."""
     q = (x, y, yaw); w = n.to_world(x, y, yaw); t0 = time.monotonic(); sent = None
+    if n.real:                                                           # 실물: 사람이 그 자리(바닥 표시)에 놓았다고 보고 AMCL에만 알린다
+        n.truth = q
     while time.monotonic() - t0 < LIMIT and not near(n.truth, q):
         if sent is None or time.monotonic() - sent > 0.5:
             n.reset(*w); sent = time.monotonic()
